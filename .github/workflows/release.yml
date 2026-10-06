@@ -1,0 +1,170 @@
+name: Release desktop app
+
+on:
+  push:
+    # 发布仅能由形如 v0.1.0 的 Git tag 触发；普通分支 push 不会打包。
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft GitHub Release if needed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" --draft --generate-notes --title "${GITHUB_REF_NAME}"
+          fi
+
+  package:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: Apple Silicon 原生 runner（macos-14 = arm64）。
+          - os: macos-14
+            artifact: macos-arm64
+            arch: arm64
+            expected_extension: dmg
+            max_package_mb: 200
+          # macOS Intel（macos-13）暂时停用：GitHub 托管 runner 经常长时间排队。
+          # 恢复时同时把发布阶段的资产数量校验改回 3。
+          # - os: macos-13
+          #   artifact: macos-intel
+          #   arch: x64
+          #   expected_extension: dmg
+          #   max_package_mb: 200
+          - os: windows-latest
+            artifact: windows-x64
+            arch: x64
+            expected_extension: exe
+            max_package_mb: 220
+          # Linux 发布暂时停用；恢复时同时把发布阶段的资产数量校验改回 4。
+          # - os: ubuntu-latest
+          #   artifact: linux-x64
+          #   arch: x64
+          #   expected_extension: AppImage
+          #   max_package_mb: 230
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.10.6'
+      - name: Enable Corepack (uses packageManager-pinned pnpm)
+        run: corepack enable
+      - name: Verify pnpm version
+        run: pnpm --version
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+      - run: pnpm install --frozen-lockfile
+      - name: Sync application version from release tag
+        # sync-version.mjs reads GITHUB_REF_NAME itself. Do not use shell interpolation:
+        # Windows runners use PowerShell, while macOS/Linux use Bash.
+        run: node scripts/sync-version.mjs
+      - name: AgentScope smoke
+        run: pnpm agentscope:smoke
+        env:
+          WORKEXPERT_AGENTSCOPE_PYTHON: python
+      - name: dsh MCP/Skills regression
+        if: ${{ false }} # Temporarily disabled in GitHub Actions; keep locally runnable.
+        run: pnpm dsh:regression
+      - name: Concurrency regression
+        if: ${{ false }} # Temporarily disabled in GitHub Actions; keep locally runnable.
+        run: pnpm concurrency:regression
+        env:
+          WORKEXPERT_AGENTSCOPE_PYTHON: python3
+          WORKEXPERT_CONCURRENCY_REGRESSION_READY_TIMEOUT_MS: '180000'
+          WORKEXPERT_CONCURRENCY_REGRESSION_DEBUG: '1'
+      - name: Package ${{ matrix.artifact }}
+        # 每个 runner 都是目标架构原生环境，因此无需再把参数透传给 pnpm/electron-builder。
+        run: pnpm package
+        env:
+          # Release builds are unsigned until signing secrets are configured.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Verify platform artifacts
+        shell: bash
+        run: |
+          find apps/desktop/release -type f -name "*.${{ matrix.expected_extension }}" -print -quit | grep -q .
+      - name: Report and enforce package-size budget
+        run: node scripts/report-package-size.mjs apps/desktop/release ${{ matrix.max_package_mb }}
+      - name: Collect final installers only
+        # 只收集最终安装器，避免把 unpacked 目录和中间文件上传到 Release。
+        run: node scripts/collect-release-artifacts.mjs apps/desktop/release release-assets-final ${{ matrix.expected_extension }}
+      - name: Upload final installer directly to draft Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" release-assets-final/* --clobber
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Release installers and prepare SHA-256 checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir publish-assets
+          gh release download "${GITHUB_REF_NAME}" --dir publish-assets --pattern '*.dmg' --pattern '*.exe'
+          # 2 个安装包：macOS Apple Silicon .dmg、Windows x64 .exe（Intel macOS 暂停）
+          test "$(find publish-assets -type f | wc -l)" -eq 2
+          cd publish-assets
+          shasum -a 256 * > checksums-sha256.txt
+      - name: Upload checksums and publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" publish-assets/checksums-sha256.txt --clobber
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
+
+  publish_npm:
+    needs: package
+    runs-on: ubuntu-latest
+    if: ${{ false }} # Temporarily disable npm publish automation.
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Enable Corepack (uses packageManager-pinned pnpm)
+        run: corepack enable
+      - name: Verify pnpm version
+        run: pnpm --version
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+      - run: pnpm install --frozen-lockfile
+      - name: Sync application version from release tag
+        run: node scripts/sync-version.mjs
+      - name: Build workspace for npm publish
+        run: pnpm build
+      - name: Publish scoped npm package
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

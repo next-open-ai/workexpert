@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  --color-workexpert-accent: var(--accent);
+  --color-workexpert-surface: var(--surface);
+  --color-workexpert-text: var(--text);
+  --color-workexpert-muted: var(--muted);
+}
+
+:root {
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --background: #f8f9fc;
+  --surface: #ffffff;
+  --surface-muted: #f1f3f8;
+  --text: #171b27;
+  --foreground: var(--text);
+  --muted: #72798a;
+  --accent: #4566db;
+  --accent-soft: #ebefff;
+  --border: #e4e7ee;
+  --sidebar: #f5f6f8;
+  color: var(--text);
+  background: var(--background);
+}
+
+:root[data-theme="dark"] {
+  --background: #12151d;
+  --surface: #1a1f2a;
+  --surface-muted: #222835;
+  --text: #f1f4fb;
+  --muted: #a7afc0;
+  --accent: #91a9ff;
+  --accent-soft: #28365e;
+  --border: #303849;
+  --sidebar: #171b24;
+}
+
+:root[data-theme="midnight"] {
+  --background: #090d1b;
+  --surface: #121936;
+  --surface-muted: #1b254a;
+  --text: #edf1ff;
+  --muted: #a8b3d8;
+  --accent: #7c6cff;
+  --accent-soft: #272358;
+  --border: #28335e;
+  --sidebar: #0d1329;
+}
+
+:root[data-theme="aurora"] {
+  --background: #071d25;
+  --surface: #102d39;
+  --surface-muted: #1a3b48;
+  --text: #effffb;
+  --muted: #afd2cc;
+  --accent: #2bc8b1;
+  --accent-soft: #164f50;
+  --border: #285565;
+  --sidebar: #0b2631;
+}
+
+@layer base {
+  html, body, #app { min-height: 100%; }
+  body { @apply m-0 min-w-80; color: var(--text); background: var(--background); }
+  button, select, textarea, input { font: inherit; }
+  button { color: inherit; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+/* Shared rich Markdown presentation for assistant replies and asset previews. */
+.chat-markdown { overflow-wrap: anywhere; color: var(--text); font-size: .96rem; line-height: 1.68; letter-spacing: .005em; }
+.chat-markdown > :first-child { margin-top: 0; }
+.chat-markdown > :last-child { margin-bottom: 0; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3,
+.chat-markdown h4, .chat-markdown h5, .chat-markdown h6 { margin: .9rem 0 .35rem; font-weight: 700; line-height: 1.35; }
+.chat-markdown h1 { font-size: 1.35rem; letter-spacing: -.02em; }
+.chat-markdown h2 { font-size: 1.15rem; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); padding-bottom: .25rem; }
+.chat-markdown h3, .chat-markdown h4, .chat-markdown h5, .chat-markdown h6 { font-size: 1rem; }
+.chat-markdown p { margin: .42rem 0; }
+.chat-markdown h1 + p, .chat-markdown h2 + p, .chat-markdown h3 + p,
+.chat-markdown h4 + p, .chat-markdown h5 + p, .chat-markdown h6 + p { margin-top: .3rem; }
+.chat-markdown ul, .chat-markdown ol { display: grid; gap: .2rem; margin: .5rem 0; padding-left: 1.5rem; }
+.chat-markdown li { line-height: 1.62; }
+.chat-markdown li::marker { color: var(--accent); font-weight: 700; }
+.chat-markdown blockquote { margin: .55rem 0; border-left: 3px solid var(--accent); padding: .3rem .8rem; color: var(--muted); background: var(--surface-muted); border-radius: 0 .5rem .5rem 0; }
+.chat-markdown hr { margin: .8rem 0; border: 0; border-top: 1px solid var(--border); }
+.chat-markdown code { border-radius: .3rem; background: var(--surface-muted); padding: .12rem .35rem; font-size: .88em; }
+.chat-markdown pre { overflow-x: auto; margin: .65rem 0; border: 1px solid var(--border); border-radius: .7rem; background: color-mix(in srgb, var(--surface-muted) 86%, #111827 14%); padding: .9rem 1rem; line-height: 1.55; box-shadow: 0 3px 12px color-mix(in srgb, #000 8%, transparent); }
+.chat-markdown pre code { padding: 0; background: transparent; }
+.chat-markdown a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.chat-md-table-wrap { overflow-x: auto; margin: .65rem 0 .75rem; border: 1px solid var(--border); border-radius: .65rem; box-shadow: 0 2px 8px color-mix(in srgb, #000 5%, transparent); }
+.chat-markdown table { width: 100%; min-width: 32rem; border-collapse: separate; border-spacing: 0; font-size: .9em; }
+.chat-markdown th, .chat-markdown td { border-bottom: 1px solid var(--border); padding: .62rem .75rem; text-align: left; vertical-align: top; }
+.chat-markdown th { background: color-mix(in srgb, var(--surface-muted) 88%, var(--accent) 12%); font-weight: 700; white-space: nowrap; }
+.chat-markdown tr:last-child td { border-bottom: 0; }
+.chat-markdown tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-muted) 42%, transparent); }
+.chat-markdown tbody tr:hover td { background: color-mix(in srgb, var(--accent) 7%, transparent); }

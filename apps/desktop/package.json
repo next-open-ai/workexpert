@@ -1,0 +1,69 @@
+{
+  "name": "@workexpert/desktop",
+  "version": "0.2.16",
+  "private": true,
+  "description": "WorkExpert cross-platform local AI workspace.",
+  "main": "src/main/index.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/tools build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/channel build && pnpm --filter @workexpert/gateway build && pnpm --filter @workexpert/agent-core build && pnpm --filter @workexpert/orchestrator build && pnpm --filter @workexpert/api build && pnpm --filter @workexpert/renderer build",
+    "stage": "node scripts/stage.mjs",
+    "package": "node ../../scripts/prepare-agentscope-runtime.mjs && pnpm build && pnpm stage && electron-builder --publish never",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "electron": "^37.2.4",
+    "electron-builder": "^24.13.3",
+    "electron-builder-squirrel-windows": "^24.13.3",
+    "typescript": "^5.8.3"
+  },
+  "build": {
+    "appId": "com.workexpert.desktop",
+    "productName": "WorkExpert",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "icon": "build/icon.png",
+    "files": [
+      "src/main/**",
+      "src/preload/**",
+      "stage/renderer/**",
+      "stage/sqljs/**"
+    ],
+    "extraResources": [
+      {
+        "from": "stage/api",
+        "to": "api"
+      },
+      {
+        "from": "stage/agentscope-runtime",
+        "to": "agentscope-runtime"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "sql.js": "^1.14.2"
+  }
+}

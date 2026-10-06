@@ -1,0 +1,251 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import type { McpConnectionRuntime, AgentSkillRuntime } from '@workexpert/contracts';
+import type { WorkExpertDshModelRoute } from './model-route.js';
+import { WORKEXPERT_DSH_API_KEY_ENV, WORKEXPERT_DSH_PROVIDER_ROUTE } from './model-route.js';
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function yamlBlock(indent: string, record: Record<string, string>): string[] {
+  const keys = Object.keys(record);
+  if (!keys.length) return [`${indent}{}`];
+  return keys.map((key) => `${indent}${key}: ${yamlString(record[key]!)}`);
+}
+
+function sanitizeServerName(raw: string, used: Set<string>): string {
+  let base = String(raw || 'mcp')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+  if (!base || !/^[A-Za-z0-9_]/.test(base)) base = `mcp_${base}`.slice(0, 32);
+  if (!base) base = 'mcp';
+  let name = base;
+  let n = 2;
+  while (used.has(name)) {
+    const suffix = `_${n}`;
+    name = `${base.slice(0, Math.max(1, 32 - suffix.length))}${suffix}`;
+    n += 1;
+  }
+  used.add(name);
+  return name;
+}
+
+export type WorkExpertDshCordisOptions = {
+  route: WorkExpertDshModelRoute;
+  mcpConnections?: McpConnectionRuntime[];
+  /** When true, enable dsh skill stack (filesystem under DSH_CWD/.agents/skills). */
+  skillsEnabled?: boolean;
+  /** Absolute custom skill dirs (usually materialize root). */
+  customSkillDirs?: string[];
+  mcpToolTimeoutMs?: number;
+};
+
+function buildMcpPluginLines(
+  connections: McpConnectionRuntime[] | undefined,
+  toolTimeoutMs: number,
+): string[] {
+  const enabled = (connections ?? []).filter((item) => item.enabled !== false).slice(0, 12);
+  if (!enabled.length) return [];
+  const used = new Set<string>();
+  const lines: string[] = [];
+
+  for (const conn of enabled) {
+    const serverName = sanitizeServerName(conn.id || conn.name, used);
+    const pluginId = `mcp-${serverName}`.slice(0, 48);
+
+    if (conn.transport === 'stdio') {
+      lines.push(
+        `- id: ${pluginId}`,
+        "  name: '@deepseek-ai/dsh-mcp-client'",
+        '  config:',
+        '    transport: stdio',
+        `    serverName: ${yamlString(serverName)}`,
+        `    command: ${yamlString(conn.command)}`,
+        ...(conn.args?.length
+          ? ['    args:', ...conn.args.map((arg) => `      - ${yamlString(arg)}`)]
+          : ['    args: []']),
+        '    env:',
+        ...yamlBlock('      ', conn.env ?? {}),
+        `    cwd: ${yamlString(conn.cwd || '')}`,
+        `    toolCallTimeoutMs: ${toolTimeoutMs}`,
+        // Block cordis activation until tools/list succeeds so the first LLM
+        // turn already sees mcp__* in the function schema (avoids bash fallback).
+        '    failOnStartupError: true',
+        '',
+      );
+      continue;
+    }
+
+    // WorkExpert http/sse → dsh streamable-http (best effort for SSE endpoints).
+    const headers: Record<string, string> = {};
+    if (conn.apiKey?.trim()) headers.Authorization = `Bearer ${conn.apiKey.trim()}`;
+    lines.push(
+      `- id: ${pluginId}`,
+      "  name: '@deepseek-ai/dsh-mcp-client'",
+      '  config:',
+      '    transport: streamable-http',
+      `    serverName: ${yamlString(serverName)}`,
+      `    url: ${yamlString(conn.url)}`,
+      '    headers:',
+      ...yamlBlock('      ', headers),
+      `    toolCallTimeoutMs: ${toolTimeoutMs}`,
+      '    failOnStartupError: true',
+      '',
+    );
+  }
+
+  return lines;
+}
+
+/**
+ * Build a jsonrpc-agent-compatible cordis.yml that uses llm-pi-ai with one
+ * WorkExpert-declared provider route, optional MCP clients, and optional skills.
+ *
+ * `sdk-jsonrpc-server` stays last so stdin opens after adapters/tools register.
+ */
+export function buildWorkExpertDshCordisYaml(options: WorkExpertDshCordisOptions | WorkExpertDshModelRoute): string {
+  const opts: WorkExpertDshCordisOptions =
+    options && typeof options === 'object' && 'route' in options && (options as WorkExpertDshCordisOptions).route
+      ? (options as WorkExpertDshCordisOptions)
+      : { route: options as WorkExpertDshModelRoute };
+  const route = opts.route;
+  const skillsEnabled = Boolean(opts.skillsEnabled);
+  const customDirs = (opts.customSkillDirs ?? []).filter(Boolean);
+  const toolTimeoutMs = Math.min(300_000, Math.max(3_000, opts.mcpToolTimeoutMs ?? 60_000));
+  const mcpLines = buildMcpPluginLines(opts.mcpConnections, toolTimeoutMs);
+
+  const skillBlock = skillsEnabled
+    ? [
+        '    skills:',
+        '      enabled: true',
+        '      filesystem:',
+        '        includeDefaultRoots: true',
+        '        watch: false',
+        ...(customDirs.length
+          ? [
+              '        customSkillDirs:',
+              ...customDirs.map((dir) => `          - ${yamlString(dir)}`),
+            ]
+          : ['        customSkillDirs: []']),
+      ]
+    : [
+        '    skills:',
+        '      enabled: false',
+      ];
+
+  const lines = [
+    '# Generated by WorkExpert — do not edit by hand.',
+    '# stdout is reserved for JSON-RPC; no console logger / terminal UI.',
+    '# llm / tools / mcp load BEFORE sdk-jsonrpc-server.',
+    '',
+    '- id: llm-pi-ai',
+    "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+    '  config:',
+    '    providers:',
+    `      ${WORKEXPERT_DSH_PROVIDER_ROUTE}:`,
+    `        displayName: ${yamlString(route.displayName)}`,
+    `        apiKeyEnv: ${WORKEXPERT_DSH_API_KEY_ENV}`,
+    `        api: ${route.api}`,
+    `        baseURL: ${yamlString(route.baseUrl)}`,
+    '        models:',
+    `          - id: ${yamlString(route.model)}`,
+    `            contextWindow: ${route.contextWindow}`,
+    `            maxTokens: ${route.maxTokens}`,
+    '',
+    '- id: subprocess',
+    "  name: '@deepseek-ai/dsh-subprocess-local'",
+    '',
+    '- id: bash',
+    "  name: '@deepseek-ai/dsh-bash-local'",
+    '  config:',
+    '    cwd: !!js process.env.DSH_CWD ?? process.cwd()',
+    '    timeoutMs: 60000',
+    '',
+    '- id: agent-spine',
+    "  name: '@deepseek-ai/dsh-agent-spine-demo'",
+    '  config:',
+    "    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a coding agent.'",
+    '    workspaceContext: false',
+    ...skillBlock,
+    '    toolBash:',
+    '      enableRunInBackground: false',
+    '    toolJobs: false',
+    '',
+    '- id: sessions',
+    "  name: '@deepseek-ai/dsh-session-persistence-jsonl'",
+    '  config:',
+    "    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'",
+    "    compression: !!js \"process.env.DSH_SNAPSHOT === undefined ? 'zstd' : 'none'\"",
+    '',
+    '- id: session-checkpoints',
+    "  name: '@deepseek-ai/dsh-session-checkpoint-policy'",
+    '',
+    '- id: subagent',
+    "  name: '@deepseek-ai/dsh-subagent'",
+    '',
+    '- id: subagent-spawn-in-process',
+    "  name: '@deepseek-ai/dsh-subagent-spawn-in-process'",
+    '  config:',
+    '    providerName: spawn',
+    '',
+    '- id: tool-subagent',
+    "  name: '@deepseek-ai/dsh-tool-subagent'",
+    '  config:',
+    '    provider: spawn',
+    '    toolName: subagent',
+    '    enableRunInBackground: false',
+    '',
+    '- id: tool-todo',
+    "  name: '@deepseek-ai/dsh-tool-todo'",
+    '  config:',
+    '    allowParallelInProgress: true',
+    '',
+    '- id: fs-local',
+    "  name: '@deepseek-ai/dsh-fs-local'",
+    '  config:',
+    '    cwd: !!js process.env.DSH_CWD ?? process.cwd()',
+    '',
+    '- id: fs-observation-policy',
+    "  name: '@deepseek-ai/dsh-fs-observation-policy'",
+    '',
+    '- id: tool-fs',
+    "  name: '@deepseek-ai/dsh-tool-fs'",
+    '',
+    '- id: token-meter',
+    "  name: '@deepseek-ai/dsh-token-meter'",
+    '',
+    '- id: compaction-basic',
+    "  name: '@deepseek-ai/dsh-compaction-basic'",
+    '  config:',
+    '    thresholdRatio: 0.8',
+    '    retainRatio: 0.16',
+    '    maxTokens: 8192',
+    '    compactionRetries: 1',
+    '',
+    ...mcpLines,
+    '# Open stdin last — only after provider/tools/mcp exist.',
+    '- id: sdk-jsonrpc-server',
+    "  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'",
+    '  config:',
+    '    maxTokensAsSuccess: true',
+    '',
+  ];
+  return lines.join('\n');
+}
+
+/** Write cordis next to the run workspace; return absolute path. */
+export function writeWorkExpertDshCordis(
+  workspaceDir: string,
+  options: WorkExpertDshCordisOptions | WorkExpertDshModelRoute,
+): string {
+  const file = path.join(workspaceDir, '.workexpert-dsh.cordis.yml');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(file, buildWorkExpertDshCordisYaml(options), 'utf8');
+  return file;
+}
+
+/** @deprecated use WorkExpertDshCordisOptions — kept for typed callers that only pass route. */
+export type { AgentSkillRuntime };
