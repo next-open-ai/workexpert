@@ -45,6 +45,7 @@ test('five-step governance stages candidates, validates changes and rolls back b
     assert.deepEqual(preview.validation.blockers, []);
     const staged = await runtime.stageOntologyCandidates(kb);
     assert.equal(staged.draft.nodes.some((node) => node.id === 'next'), true);
+    assert.equal(staged.candidates[0]?.status, 'staged');
     await publishOntologyDraft(kb, { note: '增加实体', publisher: 'tester' });
     const versions = await runtime.listOntologyVersions(kb);
     assert.equal(versions.length, 2);
@@ -66,6 +67,22 @@ test('draft repair removes orphan relations and defers their candidates', async 
     assert.deepEqual(repaired.removedEdgeIds, ['orphan-edge']);
     assert.equal(repaired.workflow.candidates[0]?.status, 'deferred');
     assert.deepEqual((await runtime.previewOntologyChanges(kb)).validation.blockers, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('governance changes to staged candidates remain authoritative in publish preview', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'workexpert-ontology-staged-governance-'));
+  const kb = { id: 'kb-staged-governance', name: 'Staged governance', provider: 'lancedb' as const, enabled: true, dataDir: dir };
+  try {
+    const runtime = await import('../ontology-runtime.js');
+    await runtime.importOntologyCandidates(kb, [{ id: 'orphan-candidate', kind: 'edge', confidence: 1, status: 'accepted', edge: { id: 'orphan-edge', subjectId: 'missing', predicate: '关联', objectId: 'also-missing', properties: {}, status: 'draft' }, evidence: [{ documentId: 'doc', quote: '关系证据' }] }]);
+    await runtime.stageOntologyCandidates(kb);
+    assert.equal((await runtime.previewOntologyChanges(kb)).validation.blockers.length, 1);
+    // Simulate a draft created before the staged-candidate lifecycle was introduced.
+    await runtime.reviewOntologyCandidates(kb, ['orphan-candidate'], 'accepted');
+    await runtime.applyOntologyGovernance(kb, [{ type: 'delete_edge', edgeId: 'orphan-edge' }], 'rule');
+    assert.deepEqual((await runtime.previewOntologyChanges(kb)).validation.blockers, []);
+    assert.equal((await runtime.readOntologyWorkflow(kb)).candidates[0]?.status, 'accepted');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -108,5 +125,30 @@ test('governance resolves naming and isolated entities through explicit actions'
     assert.equal(governed.issues.some((issue) => issue.id === 'isolated:term'), false);
     assert.equal(governed.issues.some((issue) => issue.id === 'isolated:internal'), false);
     assert.equal(governed.graph.edges[0]?.id, 'manual-edge');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('knowledge model is inferred, saved and validates friendly schema rules', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'workexpert-ontology-model-'));
+  const kb = { id: 'kb-model', name: 'Model', provider: 'lancedb' as const, enabled: true, dataDir: dir };
+  try {
+    const runtime = await import('../ontology-runtime.js');
+    await saveOntologyDraft(kb, { version: 1, nodes: [
+      { id: 'customer', type: '客户', name: '客户A', aliases: [], properties: { 等级: '重点' }, status: 'draft' },
+      { id: 'project', type: '项目', name: '项目X', aliases: [], properties: { 预算: 100 }, status: 'draft' },
+    ], edges: [{ id: 'owns', subjectId: 'customer', predicate: '负责', objectId: 'project', properties: {}, status: 'draft' }] });
+    const inferred = await runtime.inspectOntologyModel(kb);
+    assert.equal(inferred.inferred, true);
+    assert.deepEqual(inferred.model.relationTypes[0]?.subjectTypes, ['客户']);
+    assert.deepEqual(inferred.usage.entityTypes.find((item) => item.name === '客户')?.examples, ['客户A']);
+    assert.deepEqual(inferred.usage.relationTypes[0]?.examples, [{ subject: '客户A', object: '项目X' }]);
+    assert.equal(inferred.model.entityTypes.find((item) => item.name === '项目')?.properties[0]?.dataType, 'number');
+    const customer = inferred.model.entityTypes.find((item) => item.name === '客户')!;
+    customer.properties.push({ id: 'code', name: '客户编码', dataType: 'text', required: true });
+    await runtime.saveOntologyModel(kb, inferred.model);
+    const inspected = await runtime.inspectOntologyModel(kb);
+    assert.equal(inspected.inferred, false);
+    assert.equal(inspected.validation.blockers.some((item) => item.includes('客户编码')), true);
+    await assert.rejects(() => publishOntologyDraft(kb), /阻断问题/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

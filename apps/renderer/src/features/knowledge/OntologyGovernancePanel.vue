@@ -30,6 +30,7 @@ const emit = defineEmits<{
   updated: [workflow: OntologyWorkflowPayload];
   proceed: [];
   back: [];
+  openEvidence: [evidence: { documentId?: string; chunkId?: string; source?: string }];
 }>();
 const notify = useNotify(),
   data = ref<OntologyGovernancePayload | null>(null),
@@ -49,7 +50,7 @@ const notify = useNotify(),
   >("idle"),
   relationDirection = ref<"out" | "in">("out"),
   ignored = ref(new Set<string>());
-const canvasMode = ref<"graph" | "issues">("graph");
+const canvasMode = ref<"graph" | "issues">("issues");
 type GraphEditItem =
   | { kind: "node"; value: { id: string; name: string; type: string } }
   | { kind: "edge"; value: { id: string; subjectId: string; predicate: string; objectId: string } };
@@ -93,6 +94,32 @@ const selectedNode = computed(() =>
     (node) => node.id === selected.value?.nodeIds[0],
   ),
 );
+const selectedEdge = computed(() =>
+  (data.value?.graph.edges as any[] | undefined)?.find(
+    (edge) => edge.id === selected.value?.edgeIds[0],
+  ),
+);
+const graphNodeIds = computed(
+  () => new Set(((data.value?.graph.nodes as any[]) || []).map((node) => node.id)),
+);
+const orphanDetail = computed(() => {
+  if (selected.value?.category !== "orphan_edge" || !selectedEdge.value)
+    return null;
+  const edge = selectedEdge.value;
+  const missingSubject = !graphNodeIds.value.has(edge.subjectId);
+  const missingObject = !graphNodeIds.value.has(edge.objectId);
+  return {
+    edge,
+    missingSubject,
+    missingObject,
+    missingLabel:
+      missingSubject && missingObject
+        ? "主体和客体实体都不存在"
+        : missingSubject
+          ? "主体实体不存在"
+          : "客体实体不存在",
+  };
+});
 const relationTargets = computed(() =>
   ((data.value?.graph.nodes as any[]) || []).filter(
     (node) => node.id !== selected.value?.nodeIds[0],
@@ -162,6 +189,26 @@ function count(key: string) {
     ? activeIssues.value.length
     : activeIssues.value.filter((i) => i.category === key).length;
 }
+function commandLabel(command: OntologyGovernanceCommand) {
+  if (command.type === "delete_edge") return "移除这条无效关系";
+  if (command.type === "reverse_edge") return "调换关系方向";
+  if (command.type === "merge_nodes") return "合并重复实体";
+  if (command.type === "rename_node") return "修改实体名称";
+  if (command.type === "change_node_type") return "修改实体类型";
+  if (command.type === "mark_term") return "保留为独立术语";
+  if (command.type === "add_edge") return "补充实体关系";
+  if (command.type === "delete_node") return "删除实体";
+  return "执行修复";
+}
+const suggestedAction = computed(() => {
+  const commands = selected.value?.suggestedCommands || [];
+  return commands.length ? commands.map(commandLabel).join("、") : "需要人工确认处理方式";
+});
+function editSelectedEdge() {
+  const edge = selectedEdge.value;
+  if (!edge) return;
+  editGraphItem({ kind: "edge", value: edge });
+}
 function suggestionStatus(suggestion: OntologyGovernanceSuggestion) {
   if (appliedSuggestionIds.value.has(suggestion.issueId)) return "applied";
   return data.value?.issues.some((issue) => issue.id === suggestion.issueId)
@@ -176,6 +223,8 @@ async function load() {
     if (selected.value)
       selected.value =
         data.value.issues.find((i) => i.id === selected.value?.id) || null;
+    else if (data.value.issues.length)
+      choose(data.value.issues[0]!);
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -366,7 +415,7 @@ onBeforeUnmount(() => {
       class="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4"
     >
       <div>
-        <h3 class="font-semibold">图谱治理中心</h3>
+        <h3 class="font-semibold">AI 优化中心</h3>
         <p class="mt-1 text-xs text-[var(--muted)]">
           逐项处理规则扫描和 AI 建议。所有操作只修改草稿，发布前可撤销。
         </p>
@@ -388,7 +437,7 @@ onBeforeUnmount(() => {
           :disabled="aiBusy || !activeIssues.length"
           @click="generateAi"
         >
-          {{ aiBusy ? "AI 分析中…" : "AI 辅助治理" }}
+          {{ aiBusy ? "AI 分析中…" : "AI 生成优化建议" }}
         </button>
       </div>
     </header>
@@ -396,7 +445,7 @@ onBeforeUnmount(() => {
       v-if="error"
       class="border-b border-rose-200 bg-rose-50 px-5 py-3 text-xs text-rose-700"
     >
-      <strong>AI 治理未完成</strong>
+      <strong>AI 优化建议生成未完成</strong>
       <p class="mt-1">{{ error }}</p>
     </div>
     <div
@@ -476,7 +525,7 @@ onBeforeUnmount(() => {
             <p class="mt-0.5 text-[10px] text-[var(--muted)]">
               {{
                 canvasMode === "graph"
-                  ? "浏览完整网络并搜索定位实体；切换问题清单可进行治理"
+                  ? "浏览完整网络并搜索定位实体；切换问题清单可逐项优化"
                   : selected
                     ? "仅显示当前问题涉及的实体和关系"
                     : "选择问题查看证据、影响范围及修复方案"
@@ -520,6 +569,7 @@ onBeforeUnmount(() => {
           compact
           editable
           @edit="editGraphItem"
+          @open-evidence="emit('openEvidence', $event)"
         />
         <OntologyGraphView
           v-else-if="selected"
@@ -528,6 +578,7 @@ onBeforeUnmount(() => {
           compact
           editable
           @edit="editGraphItem"
+          @open-evidence="emit('openEvidence', $event)"
         />
         <div
           v-else-if="busy"
@@ -591,6 +642,26 @@ onBeforeUnmount(() => {
           <p class="mt-2 text-xs leading-relaxed text-[var(--muted)]">
             {{ selected.description }}
           </p>
+          <div
+            v-if="selected.category === 'orphan_edge' && orphanDetail"
+            class="mt-4 space-y-3 rounded-xl border border-rose-200 bg-rose-50/60 p-3 text-xs"
+          >
+            <div>
+              <strong class="text-rose-800">这是什么问题？</strong>
+              <p class="mt-1 leading-relaxed text-rose-700">
+                一条有效关系必须同时找到“主体实体”和“客体实体”。当前关系引用了已不存在或未成功创建的实体，因此关系链不完整，无法可靠展示、检索或推理。
+              </p>
+            </div>
+            <div class="rounded-lg bg-white/80 p-2.5">
+              <p class="font-semibold text-[var(--text)]">检测到的特征</p>
+              <dl class="mt-2 grid grid-cols-[54px_1fr] gap-x-2 gap-y-1 text-[var(--muted)]">
+                <dt>主体</dt><dd class="break-all">{{ orphanDetail.edge.subjectId }} <span v-if="orphanDetail.missingSubject" class="font-semibold text-rose-700">（不存在）</span></dd>
+                <dt>关系</dt><dd class="break-all">{{ orphanDetail.edge.predicate }}</dd>
+                <dt>客体</dt><dd class="break-all">{{ orphanDetail.edge.objectId }} <span v-if="orphanDetail.missingObject" class="font-semibold text-rose-700">（不存在）</span></dd>
+              </dl>
+              <p class="mt-2 font-semibold text-rose-700">结论：{{ orphanDetail.missingLabel }}</p>
+            </div>
+          </div>
           <div class="mt-4 rounded-xl bg-[var(--surface-muted)] p-3 text-xs">
             <p><strong>影响范围</strong></p>
             <p class="mt-1 text-[var(--muted)]">
@@ -598,6 +669,15 @@ onBeforeUnmount(() => {
                 selected.edgeIds.length
               }}
               条关系
+            </p>
+          </div>
+          <div
+            v-if="selected.suggestedCommands.length"
+            class="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs"
+          >
+            <strong class="text-blue-800">系统建议</strong>
+            <p class="mt-1 leading-relaxed text-blue-700">
+              {{ suggestedAction }}。执行前只会修改当前草稿，并记录到操作历史。
             </p>
           </div>
           <template v-if="selected.category === 'naming'"
@@ -706,6 +786,30 @@ onBeforeUnmount(() => {
               </button>
             </div></template
           >
+          <template v-else-if="selected.category === 'orphan_edge'">
+            <div class="mt-4 space-y-2">
+              <button
+                class="w-full rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold"
+                :disabled="!selectedEdge"
+                @click="editSelectedEdge"
+              >
+                修改关系端点
+              </button>
+              <p class="text-[10px] leading-relaxed text-[var(--muted)]">
+                如果这条关系本身有业务意义，请将缺失端点改为现有实体。
+              </p>
+              <button
+                class="w-full rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                :disabled="!selected.suggestedCommands.length"
+                @click="applyIssue"
+              >
+                移除这条无效关系
+              </button>
+              <p class="text-[10px] leading-relaxed text-[var(--muted)]">
+                如果无法确认正确实体，建议先移除，避免不完整关系阻止发布。
+              </p>
+            </div>
+          </template>
           <template v-else
             ><label
               v-if="selected.category === 'duplicate_node'"
@@ -734,13 +838,13 @@ onBeforeUnmount(() => {
                 {{
                   selected.category === "duplicate_node"
                     ? "合并到草稿"
-                    : "应用建议"
+                    : suggestedAction
                 }}
               </button>
             </div></template
           ></template
         ><template v-else
-          ><h4 class="text-sm font-semibold">治理说明</h4>
+          ><h4 class="text-sm font-semibold">优化说明</h4>
           <p class="mt-2 text-xs leading-relaxed text-[var(--muted)]">
             规则引擎负责确定性检查；AI
             只生成结构化修复建议。选择左侧问题后可核对影响并应用到草稿。

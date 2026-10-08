@@ -1268,7 +1268,7 @@ export function createKnowledgeTools(input: {
   return [
     defineAgentTool({
       name: 'kb_search',
-      description: `Search authorized private knowledge bases. Available: ${catalog}. Prefer kb_search for internal docs; use web_search only for public internet facts. Cite returned sources; never invent passages.`,
+      description: `Search authorized private knowledge bases with vector recall, ontology expansion, and graph-bound evidence. Available: ${catalog}. Prefer kb_search for internal docs; use web_search only for public internet facts. Cite returned sources; when strategies include matchedEntityNames or relationPaths, briefly expose the relevant entity/relationship path behind the answer. Never invent passages or graph paths.`,
       parameters: Type.Object({
         query: Type.String({ minLength: 2, maxLength: 800 }),
         knowledgeBaseId: Type.Optional(Type.String({ description: 'Optional specific knowledge base id; omit to search all authorized bases.' })),
@@ -1283,12 +1283,12 @@ export function createKnowledgeTools(input: {
         }
         const hits: KnowledgeHit[] = [];
         const errors: string[] = [];
-        const strategies: Array<{ knowledgeBaseId: string; strategy: HybridKnowledgeSearchResult['strategy']; matchedEntities: number }> = [];
+        const strategies: Array<{ knowledgeBaseId: string; knowledgeBaseName: string; strategy: HybridKnowledgeSearchResult['strategy']; matchedEntities: number; matchedEntityNames?: string[]; relationPaths?: string[]; evidenceCount?: number }> = [];
         for (const kb of targets) {
           if (kb.ontologyEnabled === false) {
             try {
               hits.push(...await searchKnowledgeBase(kb, query, topK, input.model));
-              strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 });
+              strategies.push({ knowledgeBaseId: kb.id, knowledgeBaseName: kb.name, strategy: 'vector-only', matchedEntities: 0 });
             } catch (error) {
               errors.push(`${kb.name}: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -1297,11 +1297,12 @@ export function createKnowledgeTools(input: {
           try {
             const hybrid = await searchKnowledgeWithOntology(kb, query, topK, input.model, input.semanticModel);
             hits.push(...hybrid.results);
-            strategies.push({ knowledgeBaseId: kb.id, strategy: hybrid.strategy, matchedEntities: hybrid.plan.matchedNodes.length });
+            const names = new Map([...hybrid.plan.matchedNodes, ...hybrid.plan.relatedNodes].map((node) => [node.id, node.name]));
+            strategies.push({ knowledgeBaseId: kb.id, knowledgeBaseName: kb.name, strategy: hybrid.strategy, matchedEntities: hybrid.plan.matchedNodes.length, matchedEntityNames: hybrid.plan.matchedNodes.map((node) => node.name), relationPaths: hybrid.plan.paths.map((path) => path.nodeIds.map((id) => names.get(id) || id).join(' → ')), evidenceCount: hybrid.plan.evidenceRefs.length });
           } catch (error) {
             // Ontology is an enhancement, never a hard dependency. A damaged or
             // unavailable graph must not hide otherwise valid private knowledge.
-            try { hits.push(...await searchKnowledgeBase(kb, query, topK, input.model)); strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 }); }
+            try { hits.push(...await searchKnowledgeBase(kb, query, topK, input.model)); strategies.push({ knowledgeBaseId: kb.id, knowledgeBaseName: kb.name, strategy: 'vector-only', matchedEntities: 0 }); }
             catch (fallbackError) { errors.push(`${kb.name}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`); }
           }
         }

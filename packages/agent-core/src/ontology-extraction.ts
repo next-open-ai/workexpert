@@ -79,6 +79,27 @@ function verifiedQuote(chunk: ExtractionChunk, quote: string) {
   return clean;
 }
 
+function resolveEvidenceChunk(
+  chunksById: Map<string, ExtractionChunk>,
+  chunks: ExtractionChunk[],
+  chunkId: string,
+  quote: string,
+  recoverMismatchedEvidence: boolean,
+) {
+  const exact = chunksById.get(chunkId);
+  if (exact) return exact;
+  if (recoverMismatchedEvidence) {
+    const normalizedQuote = quote.replace(/\s+/g, ' ').trim();
+    const matches = normalizedQuote
+      ? chunks.filter((chunk) => chunk.content.replace(/\s+/g, ' ').includes(normalizedQuote))
+      : [];
+    // A wrong id is safe to repair only when the quoted evidence identifies one
+    // authorized chunk unambiguously. The model-provided id is never trusted.
+    if (matches.length === 1) return matches[0];
+  }
+  throw new OntologyEvidenceVerificationError(`模型引用了未授权的知识切片：${chunkId}`);
+}
+
 function parseModelJson(text: string) {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1];
   const raw = (fenced || text).trim();
@@ -95,16 +116,15 @@ function parseModelJson(text: string) {
 export function normalizeOntologyExtraction(
   text: string,
   chunks: ExtractionChunk[],
-  options: { allowEmpty?: boolean; skipInvalidEvidence?: boolean } = {},
+  options: { allowEmpty?: boolean; skipInvalidEvidence?: boolean; recoverMismatchedEvidence?: boolean } = {},
 ): OntologyCandidate[] {
   const payload = parseModelJson(text);
   const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
   const acceptedNodeIds = new Set<string>();
   const candidates: OntologyCandidate[] = [];
   for (const node of payload.nodes) {
-    const chunk = chunksById.get(node.evidence.chunkId);
-    if (!chunk) throw new Error(`模型引用了未授权的知识切片：${node.evidence.chunkId}`);
     try {
+      const chunk = resolveEvidenceChunk(chunksById, chunks, node.evidence.chunkId, node.evidence.quote, Boolean(options.recoverMismatchedEvidence));
       candidates.push(OntologyCandidateSchema.parse({
         id: stableId('candidate-node', node.id, chunk.id),
         kind: 'node',
@@ -121,9 +141,8 @@ export function normalizeOntologyExtraction(
   }
   for (const edge of payload.edges) {
     if (!acceptedNodeIds.has(edge.subjectId) || !acceptedNodeIds.has(edge.objectId)) continue;
-    const chunk = chunksById.get(edge.evidence.chunkId);
-    if (!chunk) throw new Error(`模型引用了未授权的知识切片：${edge.evidence.chunkId}`);
     try {
+      const chunk = resolveEvidenceChunk(chunksById, chunks, edge.evidence.chunkId, edge.evidence.quote, Boolean(options.recoverMismatchedEvidence));
       candidates.push(OntologyCandidateSchema.parse({
         id: stableId('candidate-edge', edge.subjectId, edge.predicate, edge.objectId, chunk.id),
         kind: 'edge',
@@ -187,6 +206,29 @@ function splitExtractionChunkForRetry(chunk: ExtractionChunk): [ExtractionChunk,
 
 type AnalyzeExtractionBatch = (chunks: ExtractionChunk[]) => Promise<string>;
 
+function errorChainText(error: unknown) {
+  const messages: string[] = [];
+  let current = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if (current instanceof Error) {
+      messages.push(current.message, current.name);
+      current = current.cause;
+    } else {
+      messages.push(String(current));
+      break;
+    }
+  }
+  return messages.join(' ');
+}
+
+function isTransientExtractionError(error: unknown) {
+  return /terminated|fetch failed|failed to fetch|econnreset|econnrefused|eai_again|enotfound|socket|broken pipe|remote end closed|temporarily unavailable|timed?\s*out|timeout|429|502|503|504|und_err/i.test(errorChainText(error));
+}
+
+async function waitForExtractionRetry(ms: number) {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 export async function extractOntologyCandidateBatches(
   chunks: ExtractionChunk[],
   analyze: AnalyzeExtractionBatch,
@@ -194,8 +236,28 @@ export async function extractOntologyCandidateBatches(
 ): Promise<OntologyCandidate[]> {
   const analyzeWithFallback = async (batch: ExtractionChunk[]): Promise<OntologyCandidate[]> => {
     try {
-      return normalizeOntologyExtraction(await analyze(batch), batch, { allowEmpty: true, skipInvalidEvidence: true });
+      let response = '';
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          response = await analyze(batch);
+          break;
+        } catch (error) {
+          if (!isTransientExtractionError(error) || errorChainText(error).match(/abort/i) || attempt === 2) throw error;
+          await waitForExtractionRetry(400 * (attempt + 1));
+        }
+      }
+      return normalizeOntologyExtraction(response, batch, { allowEmpty: true, skipInvalidEvidence: true, recoverMismatchedEvidence: true });
     } catch (error) {
+      if (isTransientExtractionError(error)) {
+        if (batch.length > 1) {
+          const middle = Math.ceil(batch.length / 2);
+          return [
+            ...await analyzeWithFallback(batch.slice(0, middle)),
+            ...await analyzeWithFallback(batch.slice(middle)),
+          ];
+        }
+        throw new Error('AI 服务连接暂时中断，系统已自动重试但仍未恢复。请稍后直接重试，无需修改文档。', { cause: error });
+      }
       if (!(error instanceof OntologyModelOutputError)) throw error;
       if (batch.length === 1) {
         const split = splitExtractionChunkForRetry(batch[0]!);
@@ -274,6 +336,7 @@ export async function extractOntologyCandidates(input: {
         '每个 node 包含 id,type,name,aliases,properties,confidence,evidence:{chunkId,quote}。',
         '每个 edge 包含 subjectId,predicate,objectId,properties,confidence,evidence:{chunkId,quote}；两端必须引用 nodes 中的 id。',
         'id 使用简短稳定的英文或拼音标识。quote 必须是对应切片中的原文证据。合并同义实体，避免重复和过度抽取。',
+        'evidence.chunkId 必须逐字复制当前输入中 <chunk id="..."> 的 id；不得填写 document、title、实体 id 或其他批次的 id。',
         '每次最多返回 12 个节点和 18 条关系。逐个检查每个 chunk，只保留对业务检索有明确价值的候选，确保 JSON 完整闭合。',
       ].join('\n'),
       messages: [{ role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: `${input.instructions?.trim() ? `分析重点：${input.instructions.trim()}\n\n` : ''}请从以下文档切片生成待人工审核的本体候选：\n\n${corpus}` }] }],

@@ -848,6 +848,13 @@ export const startOntologyAnalysis=(input:{knowledgeBase:KnowledgeBasePayload;do
 export type OntologyAnalysisJob={id:string;status:'running'|'completed'|'failed'|'cancelled';startedAt:number;completedAt?:number;phase:string;currentBatch:number;totalBatches:number;discovered?:number;result?:{workflow:OntologyWorkflowPayload;generated:number;nodes:number;edges:number;analyzedChunks:number};error?:string};
 export const getOntologyAnalysisStatus=(jobId:string)=>postKnowledge<{ok:true;job:OntologyAnalysisJob}>('/api/knowledge/ontology/analysis/status',{jobId});
 export const cancelOntologyAnalysis=(jobId:string)=>postKnowledge<{ok:true}>('/api/knowledge/ontology/analysis/cancel',{jobId});
+export type OntologyPropertyDefinition={id:string;name:string;dataType:'text'|'number'|'date'|'boolean';required:boolean;defaultValue?:string|number|boolean;description?:string};
+export type OntologyEntityTypeDefinition={id:string;name:string;description?:string;color:string;allowAiCreate:boolean;properties:OntologyPropertyDefinition[]};
+export type OntologyRelationTypeDefinition={id:string;name:string;description?:string;subjectTypes:string[];objectTypes:string[];inverseName?:string;allowAiCreate:boolean};
+export type OntologyModelPayload={version:number;entityTypes:OntologyEntityTypeDefinition[];relationTypes:OntologyRelationTypeDefinition[];updatedAt:number};
+export type OntologyModelInspectionPayload={ok:true;model:OntologyModelPayload;validation:{blockers:string[];warnings:string[];score:number};usage:{entityTypes:Array<{name:string;count:number;examples:string[]}>;relationTypes:Array<{name:string;count:number;examples:Array<{subject:string;object:string}>}>};inferred:boolean};
+export const readOntologyModel=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<OntologyModelInspectionPayload>('/api/knowledge/ontology/model/read',{knowledgeBase});
+export const saveOntologyModel=(knowledgeBase:KnowledgeBasePayload,model:OntologyModelPayload)=>postKnowledge<{ok:true;model:OntologyModelPayload}>('/api/knowledge/ontology/model/save',{knowledgeBase,model});
 export const queryOntology = (knowledgeBase: KnowledgeBasePayload, query: string, maxHops = 2) => postKnowledge<{ ok: true; plan: OntologyQueryPlanPayload }>('/api/knowledge/ontology/query', { knowledgeBase, query, maxHops });
 export const searchKnowledgeWithOntology = (input: { knowledgeBase: KnowledgeBasePayload; query: string; topK?: number; model?: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string } }) => postKnowledge<OntologyHybridSearchPayload>('/api/knowledge/hybrid-search', input);
 

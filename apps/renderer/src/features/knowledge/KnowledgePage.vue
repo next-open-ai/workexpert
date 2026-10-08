@@ -653,6 +653,14 @@ function filterChunksByDoc(docId: string) {
   detailTab.value = 'chunks';
   void loadChunks();
 }
+async function openOntologyEvidence(evidence: { documentId?: string; chunkId?: string }) {
+  chunkDocumentId.value = evidence.documentId || '';
+  chunkQuery.value = '';
+  detailTab.value = 'chunks';
+  await loadChunks();
+  selectedChunk.value = evidence.chunkId ? chunks.value.find((item) => item.id === evidence.chunkId) || null : chunks.value[0] || null;
+  if (evidence.chunkId && !selectedChunk.value) notify.pushRaw('warning', '未找到原文切片', '文档可能已经重新索引或删除。');
+}
 
 async function fetchBailianPipelines() {
   const defaults = providerDefaults('bailian');
@@ -766,6 +774,20 @@ function detailTabLabel(tab: DetailTab) {
   return t(`knowledge.tab.${tab}`);
 }
 
+function detailTabDescription(tab: DetailTab) {
+  if (tab === 'documents') return '管理原始资料与可检索内容';
+  if (tab === 'ontology') return '建模实体、关系与业务逻辑';
+  if (tab === 'search') return '验证真实问题的召回质量';
+  return '';
+}
+
+function detailTabMark(tab: DetailTab) {
+  if (tab === 'documents') return '文';
+  if (tab === 'ontology') return '本';
+  if (tab === 'search') return '验';
+  return '';
+}
+
 function retrievalRouteLabel(route: 'raw-vector' | 'ontology-vector' | 'ontology-evidence') {
   if (route === 'ontology-evidence') return t('knowledge.route.evidence');
   if (route === 'ontology-vector') return t('knowledge.route.ontology');
@@ -819,7 +841,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
           >
             {{ t('knowledge.backToList') }}
           </button>
-          <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="openCreate">
+          <button v-if="!selected" type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="openCreate">
             {{ t('knowledge.add') }}
           </button>
         </div>
@@ -892,44 +914,44 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
       </div>
 
       <div v-else-if="selected" class="mx-auto grid max-w-[1200px] gap-5">
-        <article class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-          <div class="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p class="text-[11px] font-bold uppercase tracking-[.12em] text-[var(--muted)]">{{ meta(selected.provider).label }}</p>
-              <h2 class="mt-1 text-2xl font-bold tracking-[-.03em]">{{ selected.name }}</h2>
-              <p class="mt-1 text-sm text-[var(--muted)]">{{ selected.description || summaryLine(selected) }}</p>
-              <p v-if="supportsManage" class="mt-2 text-xs text-[var(--muted)]">{{ t('knowledge.stats', { docs: docStats.documentCount, chunks: docStats.chunkCount, backend: docStats.backend || '未提供' }) }}</p>
-              <p v-if="lastJobId" class="mt-1 text-[11px] text-[var(--muted)]">{{ t('knowledge.jobStatus', { id: lastJobId, status: lastJobStatus || '未提供' }) }}</p>
-              <p v-if="selected.indexState?.status" class="mt-1 text-[11px] text-[var(--muted)]">
-                Index status: {{ indexStatusLabel(selected) }}<span v-if="selected.indexState.signature"> · {{ selected.indexState.signature }}</span>
-              </p>
-              <p v-if="selected.provider === 'lancedb' || selected.provider === 'qdrant' || selected.provider === 'pinecone'" class="mt-1 text-[11px] text-[var(--muted)]">
-                Embedding: {{ embeddingSourceSummary(selected) }}
-              </p>
+        <article class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div class="flex flex-wrap items-center justify-between gap-4 px-5 py-3.5">
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                <h2 class="truncate text-lg font-bold tracking-[-.02em]">{{ selected.name }}</h2>
+                <span class="rounded-md bg-[var(--surface-muted)] px-2 py-1 text-[10px] font-bold uppercase tracking-[.1em] text-[var(--muted)]">{{ meta(selected.provider).label }}</span>
+                <span :class="['rounded-md px-2 py-1 text-[10px] font-semibold', isReady(selected) ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700']">{{ isReady(selected) ? '索引就绪' : indexStatusLabel(selected) }}</span>
+              </div>
+              <div class="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[var(--muted)]">
+                <span v-if="supportsManage">{{ docStats.documentCount }} 篇文档 · {{ docStats.chunkCount }} 个分片</span>
+                <span v-if="selected.provider === 'lancedb' || selected.provider === 'qdrant' || selected.provider === 'pinecone'" class="max-w-[440px] truncate">向量模型：{{ embeddingSourceSummary(selected) }}</span>
+                <span v-if="lastJobId">{{ t('knowledge.jobStatus', { id: lastJobId, status: lastJobStatus || '未提供' }) }}</span>
+              </div>
             </div>
             <div class="flex flex-wrap gap-2">
               <button v-if="supportsManage" type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="openIngest">{{ t('knowledge.upload') }}</button>
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(selected)">{{ t('knowledge.edit') }}</button>
             </div>
           </div>
-          <div class="mt-5 border-t border-[var(--border)] pt-4">
-            <p class="mb-2 text-[11px] font-semibold text-[var(--muted)]">知识工作流</p>
-            <div class="flex flex-wrap gap-2">
+          <nav class="border-t border-[var(--border)] bg-[var(--surface-muted)]/35 p-2.5" aria-label="知识库工作区">
+            <div class="grid gap-2 md:grid-cols-3">
             <button
               v-for="tab in primaryDetailTabs"
               :key="tab"
               type="button"
-              :class="['rounded-lg px-4 py-2.5 text-xs font-semibold transition', detailTab === tab ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)] hover:text-[var(--text)]']"
+              :aria-current="detailTab === tab ? 'page' : undefined"
+              :class="['group flex min-h-16 items-center gap-3 rounded-xl border px-4 py-3 text-left transition', detailTab === tab ? 'border-[var(--accent)] bg-[var(--surface)] shadow-sm ring-1 ring-[var(--accent)]/15' : 'border-transparent text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--surface)]']"
               @click="detailTab = tab"
             >
-              {{ detailTabLabel(tab) }}
+              <span :class="['grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-bold', detailTab === tab ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)] group-hover:text-[var(--text)]']">{{ detailTabMark(tab) }}</span>
+              <span class="min-w-0"><strong :class="['block text-sm', detailTab === tab ? 'text-[var(--text)]' : '']">{{ detailTabLabel(tab) }}</strong><span class="mt-0.5 block truncate text-[11px] font-normal text-[var(--muted)]">{{ detailTabDescription(tab) }}</span></span>
             </button>
             </div>
-            <div v-if="advancedDetailTabs.length" class="mt-3 flex flex-wrap items-center gap-1.5">
-              <span class="mr-1 text-[11px] text-[var(--muted)]">高级工具</span>
+            <div v-if="advancedDetailTabs.length" class="mt-2 flex flex-wrap items-center justify-end gap-1.5 px-1">
+              <span class="mr-1 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--muted)]">数据与设置</span>
               <button v-for="tab in advancedDetailTabs" :key="tab" type="button" :class="['rounded-md px-2.5 py-1.5 text-[11px] font-medium', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']" @click="detailTab = tab">{{ detailTabLabel(tab) }}</button>
             </div>
-          </div>
+          </nav>
         </article>
 
         <article v-if="detailTab === 'documents' && supportsManage" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
@@ -1026,7 +1048,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
           <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
 
-        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" />
+        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" @open-evidence="openOntologyEvidence" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 class="text-base font-bold">{{ t('knowledge.settingsTitle') }}</h3>

@@ -44,7 +44,10 @@ const props = withDefaults(
   }>(),
   { title: "正式本体关系图", compact: false, editable: false },
 );
-const emit = defineEmits<{ edit: [item: SelectedItem] }>();
+const emit = defineEmits<{
+  edit: [item: SelectedItem];
+  openEvidence: [evidence: { documentId?: string; chunkId?: string; source?: string }];
+}>();
 const graphPanel = ref<HTMLElement | null>(null);
 const container = ref<HTMLDivElement | null>(null);
 const loading = ref(false);
@@ -93,6 +96,8 @@ const visibleEdges = computed(() =>
       shownNodeIds.value.has(edge.objectId),
   ),
 );
+const hasChangeMarkers = computed(() => [...nodes.value, ...edges.value].some((item) => Boolean(item.properties?._change)));
+const hasLowConfidence = computed(() => [...nodes.value, ...edges.value].some((item) => Number(item.properties?._confidence || 1) < 0.7));
 
 const palette = [
   "#4f6be8",
@@ -110,6 +115,14 @@ function colorForType(type: string) {
 }
 function nodeName(id: string) {
   return nodeById.value.get(id)?.name || id;
+}
+function evidenceFor(item: SelectedItem) {
+  const properties = item.value.properties || {};
+  return {
+    documentId: typeof properties.documentId === "string" ? properties.documentId : undefined,
+    chunkId: typeof properties.chunkId === "string" ? properties.chunkId : undefined,
+    source: item.value.source,
+  };
 }
 function layoutOptions(): LayoutOptions {
   if (layoutName.value === "breadthfirst")
@@ -141,6 +154,8 @@ function elements(): ElementDefinition[] {
         label: node.name,
         type: node.type,
         color: colorForType(node.type),
+        change: String(node.properties?._change || ""),
+        confidence: Number(node.properties?._confidence || 1),
       },
     })),
     ...visibleEdges.value.map((edge) => ({
@@ -149,6 +164,8 @@ function elements(): ElementDefinition[] {
         source: edge.subjectId,
         target: edge.objectId,
         label: edge.predicate,
+        change: String(edge.properties?._change || ""),
+        confidence: Number(edge.properties?._confidence || 1),
       },
     })),
   ];
@@ -250,6 +267,14 @@ async function renderGraph() {
             "target-arrow-color": "#4f6be8",
           },
         },
+        { selector: 'node[change = "added"]', style: { "border-color": "#10b981", "border-width": 5 } },
+        { selector: 'node[change = "modified"]', style: { "border-color": "#3b82f6", "border-width": 5 } },
+        { selector: 'node[change = "deleted"]', style: { "border-color": "#ef4444", "border-width": 5, opacity: 0.55 } },
+        { selector: "node[confidence < 0.7]", style: { "border-style": "dashed", "border-color": "#f59e0b" } },
+        { selector: 'edge[change = "added"]', style: { "line-color": "#10b981", "target-arrow-color": "#10b981", width: 3 } },
+        { selector: 'edge[change = "modified"]', style: { "line-color": "#3b82f6", "target-arrow-color": "#3b82f6", width: 3 } },
+        { selector: 'edge[change = "deleted"]', style: { "line-color": "#ef4444", "target-arrow-color": "#ef4444", "line-style": "dashed", opacity: 0.6 } },
+        { selector: "edge[confidence < 0.7]", style: { "line-style": "dashed", "line-color": "#f59e0b", "target-arrow-color": "#f59e0b" } },
         { selector: ".faded", style: { opacity: 0.12 } },
         {
           selector: ".focus",
@@ -467,6 +492,7 @@ onBeforeUnmount(() => {
         {{ nodes.length }} 个实体。为保证交互流畅，当前优先显示有关系的前
         {{ MAX_NODES }} 个实体。
       </div>
+      <div v-if="hasChangeMarkers || hasLowConfidence" class="flex flex-wrap gap-3 border-b border-[var(--border)] px-4 py-2 text-[10px] text-[var(--muted)]"><span v-if="hasChangeMarkers" class="text-emerald-700">● 新增</span><span v-if="hasChangeMarkers" class="text-blue-700">● 修改</span><span v-if="hasChangeMarkers" class="text-rose-700">● 删除</span><span v-if="hasLowConfidence" class="text-amber-700">┄ 低置信度（低于 70%）</span></div>
       <div
         v-if="fullscreenError"
         class="border-b border-rose-200 bg-rose-50 px-5 py-2 text-xs text-rose-800"
@@ -576,6 +602,13 @@ onBeforeUnmount(() => {
             >
               来源：{{ selected.value.source }}
             </p>
+            <button
+              v-if="evidenceFor(selected).documentId || evidenceFor(selected).chunkId"
+              class="mt-3 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--accent)]"
+              @click="emit('openEvidence', evidenceFor(selected))"
+            >
+              查看原文证据
+            </button>
             <button
               v-if="editable"
               class="mt-4 w-full rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white"

@@ -402,6 +402,13 @@ function toolResultSummary(toolName: string, output: unknown) {
     return count > 0 ? `已加载 ${count} 条高置信经验。` : '未命中高置信经验（已忽略）。';
   }
   if (value.ok === false) return failText();
+  if (toolName === 'kb_search') {
+    const strategies = Array.isArray(value.strategies) ? value.strategies as Array<Record<string, unknown>> : [];
+    const graph = strategies.filter((item) => item.strategy === 'ontology-enhanced');
+    const matched = graph.reduce((sum, item) => sum + (Number(item.matchedEntities) || 0), 0);
+    const evidence = graph.reduce((sum, item) => sum + (Number(item.evidenceCount) || 0), 0);
+    return graph.length ? `知识库混合召回完成 · 命中 ${matched} 个实体 · ${evidence} 条图谱证据 · 返回 ${Number(value.count) || 0} 个片段` : `知识库向量召回完成 · 返回 ${Number(value.count) || 0} 个片段`;
+  }
   if (toolName === 'model_understand_images') return `图片理解完成 · ${String(value.modelId || '')}${value.cached ? '（复用本轮结果）' : ''}`;
   if (toolName === 'install_python_dependency') {
     const pkg = String(value.package || '');

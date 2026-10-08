@@ -44,6 +44,40 @@ test('batched ontology extraction discards unverifiable candidates but keeps ver
   assert.equal(result[0]?.node?.id, 'verified');
 });
 
+test('batched extraction safely repairs a wrong evidence id from an unambiguous quote', async () => {
+  const result = await extractOntologyCandidateBatches(chunks, async () => JSON.stringify({
+    nodes: [{ id: 'refund', type: 'concept', name: '退款问题', evidence: { chunkId: 'hallucinated-id', quote: '退款未到账属于售后问题' } }],
+    edges: [],
+  }));
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.evidence[0]?.chunkId, 'chunk-1');
+});
+
+test('batched extraction skips an unauthorized candidate that cannot be verified', async () => {
+  const result = await extractOntologyCandidateBatches(chunks, async () => JSON.stringify({
+    nodes: [
+      { id: 'verified', type: 'concept', name: '退款问题', evidence: { chunkId: 'chunk-1', quote: '退款未到账属于售后问题' } },
+      { id: 'unsafe', type: 'concept', name: '外部信息', evidence: { chunkId: 'other-batch', quote: '不在原文中的内容' } },
+    ],
+    edges: [],
+  }));
+  assert.deepEqual(result.map((item) => item.node?.id), ['verified']);
+});
+
+test('batched extraction retries a transient terminated connection without user action', async () => {
+  let calls = 0;
+  const result = await extractOntologyCandidateBatches(chunks, async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError('terminated', { cause: Object.assign(new Error('socket closed'), { code: 'UND_ERR_SOCKET' }) });
+    return JSON.stringify({
+      nodes: [{ id: 'refund', type: 'concept', name: '退款问题', evidence: { chunkId: 'chunk-1', quote: '退款未到账属于售后问题' } }],
+      edges: [],
+    });
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.length, 1);
+});
+
 test('ontology extraction partitions documents without splitting chunk contents', () => {
   const manyChunks = Array.from({ length: 13 }, (_, index) => ({
     id: `chunk-${index + 1}`,

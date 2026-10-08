@@ -484,7 +484,7 @@ export const OntologyCandidateSchema = z.object({
   edge: OntologyEdgeSchema.optional(),
   evidence: z.array(OntologyEvidenceSchema).min(1).max(20),
   confidence: z.number().min(0).max(1).default(0.5),
-  status: z.enum(['pending', 'accepted', 'rejected', 'deferred', 'committed']).default('pending'),
+  status: z.enum(['pending', 'accepted', 'staged', 'rejected', 'deferred', 'committed']).default('pending'),
   reviewedAt: z.number().int().positive().optional(),
   reviewNote: z.string().max(1000).optional(),
 }).superRefine((value, ctx) => {
@@ -499,7 +499,40 @@ export const OntologyWorkflowSchema = z.object({
   updatedAt: z.number().int().positive(),
 });
 export type OntologyWorkflow = z.infer<typeof OntologyWorkflowSchema>;
+export const OntologyPropertyDefinitionSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  dataType: z.enum(['text', 'number', 'date', 'boolean']).default('text'),
+  required: z.boolean().default(false),
+  defaultValue: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  description: z.string().max(500).optional(),
+});
+export const OntologyEntityTypeDefinitionSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  description: z.string().max(500).optional(),
+  color: z.string().max(32).default('#4f6be8'),
+  allowAiCreate: z.boolean().default(true),
+  properties: z.array(OntologyPropertyDefinitionSchema).max(100).default([]),
+});
+export const OntologyRelationTypeDefinitionSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  description: z.string().max(500).optional(),
+  subjectTypes: z.array(z.string().min(1).max(120)).max(50).default([]),
+  objectTypes: z.array(z.string().min(1).max(120)).max(50).default([]),
+  inverseName: z.string().max(120).optional(),
+  allowAiCreate: z.boolean().default(true),
+});
+export const OntologyModelSchema = z.object({
+  version: z.number().int().positive().default(1),
+  entityTypes: z.array(OntologyEntityTypeDefinitionSchema).max(200).default([]),
+  relationTypes: z.array(OntologyRelationTypeDefinitionSchema).max(300).default([]),
+  updatedAt: z.number().int().positive(),
+});
+export type OntologyModel = z.infer<typeof OntologyModelSchema>;
 export const OntologyWorkflowRequestSchema = z.object({ knowledgeBase: KnowledgeBaseRuntimeSchema });
+export const OntologyModelSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ model: OntologyModelSchema });
 export const OntologyDraftSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ graph: OntologyGraphSchema });
 export const OntologyCandidateImportRequestSchema = OntologyWorkflowRequestSchema.extend({ candidates: z.array(OntologyCandidateSchema).min(1).max(1000) });
 export const OntologyExtractRequestSchema = OntologyWorkflowRequestSchema.extend({
