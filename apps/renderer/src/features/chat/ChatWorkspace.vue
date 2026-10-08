@@ -99,6 +99,7 @@ const sending = ref(false);
 const uploadingRecording = ref(false);
 const voiceInputOpen = ref(false);
 const voiceInputBusy = ref(false);
+const voiceConfigIssue = ref('');
 const voiceProjection = new VoiceDraftProjection();
 const voiceOpening = ref(false);
 const voiceCommandEnabled = ref(false);
@@ -144,12 +145,23 @@ async function openVoice() {
   if (voiceOpening.value || voiceInputOpen.value) return;
   const token = ++voiceOpenGeneration;
   voiceOpening.value = true;
+  voiceConfigIssue.value = '';
   try {
     const capabilities = await voiceInputCapabilities();
     if (token !== voiceOpenGeneration) return;
-    if (!capabilities.asr.enabled || !capabilities.asr.configured) throw new Error('语音输入尚未启用或配置。');
+    if (!capabilities.asr.enabled || !capabilities.asr.configured) {
+      voiceConfigIssue.value = capabilities.asr.enabled
+        ? '语音输入使用独立的 ASR 服务，与对话模型无关。请先在设置的语音输入区域配置 ASR 密钥。'
+        : '语音输入当前已关闭。请先在设置的语音输入区域启用。';
+      return;
+    }
     voiceProjection.begin(draft.value); voiceInputOpen.value = true;
-  } catch (cause) { if (token === voiceOpenGeneration) notify.error(cause instanceof Error ? cause.message : '无法读取语音配置'); }
+  } catch (cause) {
+    if (token === voiceOpenGeneration) {
+      voiceConfigIssue.value = cause instanceof Error ? cause.message : '无法读取语音配置';
+      notify.error(voiceConfigIssue.value);
+    }
+  }
   finally { if (token === voiceOpenGeneration) voiceOpening.value = false; }
 }
 function previewVoiceText(text: string) {
@@ -1073,13 +1085,16 @@ onBeforeUnmount(() => {
           <option v-for="tier in tiers" :key="tier.value" :value="tier.value">
             {{ tier.label }}
           </option></select
-        ><span
+        ><button
+          type="button"
           :class="[
-            'hidden text-xs sm:inline',
+            'hidden rounded-lg px-2 py-1 text-xs transition hover:bg-[var(--surface-muted)] sm:inline',
             modelConfigured ? 'text-emerald-600' : 'text-[var(--muted)]',
           ]"
+          :title="modelConfigured ? '当前对话模型可用' : '点击前往设置配置对话模型'"
+          @click="!modelConfigured && emit('openSettings')"
           >●
-          {{ modelConfigured ? t("chat.modelReady") : t("chat.model") }}</span
+          {{ modelConfigured ? t("chat.modelReady") : t("chat.model") }}</button
         >
       </div>
     </header>
@@ -1554,6 +1569,10 @@ onBeforeUnmount(() => {
         @drop="dropAttachments"
       >
         <VoiceInputDialog v-if="voiceInputOpen" inline auto-start @close="closeVoiceInput" @session-start="beginVoiceInput" @preview="previewVoiceText" @busy="voiceInputBusy = $event" />
+        <div v-if="voiceConfigIssue && !voiceInputOpen" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200" role="status">
+          <span>{{ voiceConfigIssue }}</span>
+          <button type="button" class="shrink-0 rounded-lg border border-current/25 px-3 py-1.5 font-semibold hover:bg-white/50" @click="emit('openSettings')">前往语音设置</button>
+        </div>
         <div v-if="voiceInputOpen" class="flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--muted)]">
           <label class="inline-flex items-center gap-1.5"><input v-model="voiceCommandEnabled" type="checkbox" :disabled="autoSchedule || collaboratorIds.length > 0" />口令执行</label>
           <label class="inline-flex items-center gap-1.5"><input v-model="voiceNoticeEnabled" type="checkbox" />任务语音提示</label>
@@ -1658,19 +1677,20 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex flex-wrap items-center gap-2 border-t border-[var(--border)]/70 pt-3">
           <div class="inline-flex items-center rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
-            <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--accent)] hover:bg-[var(--surface)]" :class="{ 'bg-[var(--accent-soft)]': voiceOpening || voiceInputOpen }" :aria-pressed="voiceOpening || voiceInputOpen" :aria-label="voiceOpening || voiceInputOpen ? '停止语音输入' : '开始语音输入'" :title="voiceOpening || voiceInputOpen ? '停止语音输入' : '语音转文字'" @click="toggleVoice"><svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg></button>
+            <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--accent)] hover:bg-[var(--surface)]" :class="{ 'bg-[var(--accent-soft)]': voiceOpening || voiceInputOpen }" :aria-pressed="voiceOpening || voiceInputOpen" :aria-label="voiceOpening || voiceInputOpen ? '停止语音输入' : '开始语音输入'" :title="voiceOpening || voiceInputOpen ? '停止语音输入' : '语音转文字，使用设置中的 ASR 服务'" @click="toggleVoice"><svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg></button>
             <span class="px-1 text-[11px] text-[var(--muted)]">语音输入</span>
           </div>
           <div class="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
             <div class="relative">
-              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:opacity-35" :disabled="inputBusy || !modelConfigured" aria-label="添加附件" @click="attachmentMenuOpen = !attachmentMenuOpen">
+              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:opacity-35" :disabled="inputBusy" aria-label="添加附件" :title="modelConfigured ? '添加附件' : '可先添加附件，发送前需要配置对话模型'" @click="attachmentMenuOpen = !attachmentMenuOpen">
                 <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9"/></svg>
               </button>
               <div v-if="attachmentMenuOpen" class="absolute bottom-[calc(100%+10px)] left-0 z-40 w-72 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl">
                 <p class="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[.16em] text-[var(--muted)]">添加到当前对话</p>
+                <div v-if="!modelConfigured" class="mx-1 mb-2 rounded-xl bg-amber-50 px-3 py-2 text-[10px] leading-4 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">可以先添加附件。发送消息前需要配置对话模型。<button type="button" class="ml-1 font-semibold underline" @click="attachmentMenuOpen = false; emit('openSettings')">前往设置</button></div>
                 <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)]" @click="fileInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">▤</span><span><strong class="block text-xs">文档、演示与表格</strong><small class="text-[10px] text-[var(--muted)]">PDF、Word、PowerPoint、Excel、HTML、Markdown</small></span></button>
-                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!visionReady || images.length >= 4" @click="imageInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">▧</span><span><strong class="block text-xs">图片</strong><small class="text-[10px] text-[var(--muted)]">PNG、JPEG、WebP，最多 4 张</small></span></button>
-                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!recordingReady" @click="recordingInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">◉</span><span><strong class="block text-xs">音频</strong><small class="text-[10px] text-[var(--muted)]">常用音频格式，最多 1 个</small></span></button>
+                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!visionReady || images.length >= 4" :title="!visionReady ? '需要为当前员工配置视觉模型能力' : undefined" @click="imageInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">▧</span><span><strong class="block text-xs">图片</strong><small class="text-[10px] text-[var(--muted)]">{{ visionReady ? 'PNG、JPEG、WebP，最多 4 张' : '需要配置视觉模型能力' }}</small></span></button>
+                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!recordingReady" :title="recordingHelp" @click="recordingInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">◉</span><span><strong class="block text-xs">音频文件</strong><small class="text-[10px] text-[var(--muted)]">{{ recordingReady ? '常用音频格式，最多 1 个' : '需要员工语音识别模型能力' }}</small></span></button>
                 <p class="mx-2 mt-2 border-t border-[var(--border)] pt-2 text-[10px] leading-4 text-[var(--muted)]">附件仅用于当前对话，不会自动进入资产库或知识库。</p>
               </div>
             </div>

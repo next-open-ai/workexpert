@@ -15,6 +15,7 @@
 - DT-11: “Continue” on the task card must create a visible continuation message and a new run; “Pause” must cancel the active run instead of only changing metadata.
 - DT-12: Changes made to restored files under `.task/` must be captured back into the working set without losing source-file provenance.
 - DT-13: The platform and new digital employees default to a 30-minute wall-clock ceiling; durable-task attempts receive at least that budget, while other explicit employee timeout values remain supported. Timeout cancellation must not be reported as a user action.
+- DT-14: One provider turn may remain silent for up to 180 seconds before the stream-idle guard aborts it. Any provider event re-arms this guard. This per-turn guard is independent of, and must never extend beyond, the 30-minute whole-run ceiling.
 
 ## Non-functional
 

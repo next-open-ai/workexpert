@@ -100,15 +100,20 @@ try {
 
   const journeys = [
     ['数字员工', /数字员工|员工/],
-    ['项目', /项目/],
     ['技能与连接', /技能|Skills|MCP/],
     ['知识库', /知识库/],
     ['自动化与任务', /自动化|任务/],
     ['资产库', /资产/],
-    ['数据工作台', /数据/],
     ['远程办公', /远程|Telegram|飞书/],
     ['用户手册', /用户手册|WorkExpert/],
   ];
+  for (const hiddenNavigation of ['项目', '数据工作台']) {
+    assert.equal(
+      await page.getByRole('button', { name: hiddenNavigation, exact: true }).count(),
+      0,
+      `${hiddenNavigation} should remain hidden from primary navigation`,
+    );
+  }
   for (const [navigation, expected] of journeys) {
     await dismissStartupDialogs();
     await page.getByRole('button', { name: navigation, exact: true }).click();

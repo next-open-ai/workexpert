@@ -29,7 +29,12 @@ const navItems: NavItem[] = [
   { id: 'remote', labelKey: 'nav.remote', icon: 'remote' },
   { id: 'docs', labelKey: 'nav.docs', icon: 'docs' },
 ];
-const visibleNavItems = computed(() => navItems.filter((item) => isViewAvailable(item.id)));
+// Keep the data workbench available to contextual flows while it is intentionally
+// absent from the primary navigation to reduce the initial learning surface.
+const temporarilyHiddenNavViews = new Set<View>(['projects', 'data']);
+const visibleNavItems = computed(() => navItems.filter(
+  (item) => !temporarilyHiddenNavViews.has(item.id) && isViewAvailable(item.id),
+));
 
 const themeIcon = computed(() => themeIconNames[preference.value] as 'theme-system' | 'theme-light' | 'theme-dark' | 'theme-midnight' | 'theme-aurora');
 const themeAriaLabel = computed(() => `${t('theme.cycle')}，${t(`theme.${preference.value}`)}`);

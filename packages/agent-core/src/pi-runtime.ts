@@ -45,7 +45,7 @@ import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from './mo
 
 export const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
 /** Maximum silence for one provider turn, including the turn after a tool result. */
-export const DEFAULT_MODEL_TURN_IDLE_MS = 75_000;
+export const DEFAULT_MODEL_TURN_IDLE_MS = 180_000;
 
 /**
  * pi-agent-core has a whole-run timeout, but a provider can stall between tool

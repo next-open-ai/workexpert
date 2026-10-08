@@ -342,6 +342,8 @@ export interface EnvRemediationPack {
   problems: number;
   hostScript: string;
   dockerSnippet: string;
+  /** Whether any current problem has a Docker-specific remediation. */
+  dockerApplicable: boolean;
   composeSnippet: string;
   autoFixIds: EnvFixActionId[];
 }
@@ -414,6 +416,7 @@ export function buildRemediationPack(report: EnvCheckReport | null): EnvRemediat
     problems: problems.length,
     hostScript: hostLines.join('\n').trim(),
     dockerSnippet: dockerLines.join('\n').trim(),
+    dockerApplicable: kind.docker || seenDocker.size > 0,
     composeSnippet: compose,
     autoFixIds,
   };

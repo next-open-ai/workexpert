@@ -274,14 +274,21 @@ export async function extractOntologyCandidates(input: {
         '每个 node 包含 id,type,name,aliases,properties,confidence,evidence:{chunkId,quote}。',
         '每个 edge 包含 subjectId,predicate,objectId,properties,confidence,evidence:{chunkId,quote}；两端必须引用 nodes 中的 id。',
         'id 使用简短稳定的英文或拼音标识。quote 必须是对应切片中的原文证据。合并同义实体，避免重复和过度抽取。',
-        '每次最多返回 20 个节点和 30 条关系。逐个检查每个 chunk，只保留对业务检索有明确价值的候选，确保 JSON 完整闭合。',
+        '每次最多返回 12 个节点和 18 条关系。逐个检查每个 chunk，只保留对业务检索有明确价值的候选，确保 JSON 完整闭合。',
       ].join('\n'),
       messages: [{ role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: `${input.instructions?.trim() ? `分析重点：${input.instructions.trim()}\n\n` : ''}请从以下文档切片生成待人工审核的本体候选：\n\n${corpus}` }] }],
     }, {
       apiKey: input.model.apiKey || (input.model.provider === 'ollama' ? 'ollama' : undefined),
       signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
-      maxTokens: profile.maxTokens,
-      onPayload: createChatCompletionsPayloadPatch(input.model),
+      maxTokens: Math.max(profile.maxTokens, 12_000),
+      onPayload: (payload) => {
+        createChatCompletionsPayloadPatch(input.model)(payload);
+        if (input.model.provider === 'qwen' && payload && typeof payload === 'object') {
+          const body = payload as Record<string, unknown>;
+          body.response_format = { type: 'json_object' };
+          body.temperature = 0.1;
+        }
+      },
     });
     if (response.stopReason === 'length') throw new OntologyModelOutputError('模型输出达到长度上限。');
     if (response.stopReason === 'error' || response.stopReason === 'aborted') throw new Error(response.errorMessage || '本体分析模型未完成请求。');

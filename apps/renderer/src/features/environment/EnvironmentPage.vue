@@ -350,7 +350,7 @@ onMounted(async () => {
             <div class="min-w-0">
               <h2 class="text-sm font-semibold">修复工具包 · {{ pack.problems }} 项</h2>
               <p class="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
-                可复制主机 / Docker 脚本。白名单可自动修复（数据目录、ensurepip、AgentScope、安装 Python、清理临时脚本）。dsh 体积约 200MB，请单项安装并查看进度。
+                可复制主机脚本<span v-if="pack.dockerApplicable">或 Docker 修复片段</span>。白名单可自动修复（数据目录、ensurepip、AgentScope、安装 Python、清理临时脚本）。dsh 体积约 200MB，请单项安装并查看进度。
               </p>
             </div>
             <div class="flex flex-wrap gap-2">
@@ -366,7 +366,7 @@ onMounted(async () => {
               <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-host', pack.hostScript)">
                 {{ copiedKey === 'pack-host' ? '已复制' : '复制主机脚本' }}
               </button>
-              <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-docker', pack.dockerSnippet)">
+              <button v-if="pack.dockerApplicable" class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-docker', pack.dockerSnippet)">
                 {{ copiedKey === 'pack-docker' ? '已复制' : 'Dockerfile' }}
               </button>
               <button

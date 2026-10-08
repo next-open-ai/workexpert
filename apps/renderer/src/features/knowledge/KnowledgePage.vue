@@ -22,6 +22,7 @@ import {
   listBailianPipelines,
   getKnowledgeJobStatus,
   searchKnowledge,
+  searchKnowledgeWithOntology,
   type KnowledgeChunkRow,
   type KnowledgeDocumentRow,
   type KnowledgeBasePayload,
@@ -62,11 +63,12 @@ const chunkQuery = ref('');
 const chunkDocumentId = ref('');
 const searchQuery = ref('');
 const searching = ref(false);
+const searchStrategy = ref<'vector-only' | 'ontology-enhanced' | null>(null);
 const documents = ref<KnowledgeDocumentRow[]>([]);
 const chunks = ref<KnowledgeChunkRow[]>([]);
 const chunkTotal = ref(0);
 const docStats = ref({ documentCount: 0, chunkCount: 0, backend: '' });
-const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string }>>([]);
+const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>>([]);
 const selectedChunk = ref<KnowledgeChunkRow | null>(null);
 
 const draft = ref({
@@ -122,9 +124,11 @@ const embeddingModels = computed(() => modelSettings.value.models
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
   supportsManage.value
-    ? ['documents', 'chunks', 'search', 'ontology', 'settings']
+    ? ['documents', 'ontology', 'search', 'chunks', 'settings']
     : ['search', 'settings']
 ));
+const primaryDetailTabs = computed(() => detailTabs.value.filter((tab) => ['documents', 'ontology', 'search'].includes(tab)));
+const advancedDetailTabs = computed(() => detailTabs.value.filter((tab) => ['chunks', 'settings'].includes(tab)));
 const ingestFileBase64 = ref('');
 const ingestFileName = ref('');
 const lastJobId = ref('');
@@ -156,6 +160,7 @@ watch(selectedId, async (id) => {
   chunkDocumentId.value = '';
   searchQuery.value = '';
   searchHits.value = [];
+  searchStrategy.value = null;
   selectedChunk.value = null;
   lastJobId.value = '';
   lastJobStatus.value = '';
@@ -735,19 +740,36 @@ async function createBailianRemote() {
 async function runSearch() {
   if (!selected.value || searchQuery.value.trim().length < 2) return;
   searching.value = true;
+  searchStrategy.value = null;
   try {
-    const result = await searchKnowledge({
+    const input = {
       knowledgeBase: toPayload(selected.value),
       query: searchQuery.value.trim(),
       topK: 6,
       model: configured.value ? toModelPayload(activeConfig.value) : undefined,
-    });
+    };
+    const result = selected.value.ontologyEnabled !== false
+      ? await searchKnowledgeWithOntology(input)
+      : await searchKnowledge(input);
     searchHits.value = result.results;
+    searchStrategy.value = 'strategy' in result && result.strategy === 'ontology-enhanced'
+      ? 'ontology-enhanced'
+      : 'vector-only';
   } catch (cause) {
     notify.error(cause, 'notify.saveFailed');
   } finally {
     searching.value = false;
   }
+}
+
+function detailTabLabel(tab: DetailTab) {
+  return t(`knowledge.tab.${tab}`);
+}
+
+function retrievalRouteLabel(route: 'raw-vector' | 'ontology-vector' | 'ontology-evidence') {
+  if (route === 'ontology-evidence') return t('knowledge.route.evidence');
+  if (route === 'ontology-vector') return t('knowledge.route.ontology');
+  return t('knowledge.route.vector');
 }
 
 function summaryLine(item: KnowledgeBase) {
@@ -828,7 +850,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
         <p v-if="!filteredBases.length" class="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center text-sm text-[var(--muted)]">
           {{ t('knowledge.empty') }}
         </p>
-        <div v-else class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div v-else class="grid gap-4 md:grid-cols-2">
           <article
             v-for="item in filteredBases"
             :key="item.id"
@@ -853,12 +875,15 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               </label>
             </div>
             <p class="mt-3 line-clamp-2 text-sm text-[var(--muted)]">{{ item.description || summaryLine(item) }}</p>
-            <p class="mt-2 text-[11px] text-[var(--muted)]">{{ summaryLine(item) }}</p>
-            <p v-if="item.provider === 'lancedb' || item.provider === 'qdrant' || item.provider === 'pinecone'" class="mt-1 text-[11px] text-[var(--muted)]">
-              Embedding: {{ embeddingSourceSummary(item) }}
-            </p>
+            <dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-[var(--border)] py-4 text-xs sm:grid-cols-4">
+              <div><dt class="text-[var(--muted)]">知识内容</dt><dd class="mt-1 font-semibold">{{ item.documentCount || 0 }} 篇文档</dd></div>
+              <div><dt class="text-[var(--muted)]">知识图谱</dt><dd class="mt-1 font-semibold">{{ item.ontologyEnabled === false ? '未启用' : '本体增强' }}</dd></div>
+              <div><dt class="text-[var(--muted)]">召回方式</dt><dd class="mt-1 font-semibold">{{ item.ontologyEnabled === false ? '向量检索' : '混合召回' }}</dd></div>
+              <div><dt class="text-[var(--muted)]">索引状态</dt><dd class="mt-1 font-semibold">{{ indexStatusLabel(item) }}</dd></div>
+            </dl>
+            <p v-if="item.provider === 'lancedb' || item.provider === 'qdrant' || item.provider === 'pinecone'" class="mt-3 truncate text-[11px] text-[var(--muted)]">向量模型：{{ embeddingSourceSummary(item) }}</p>
             <div class="mt-5 flex flex-wrap gap-2">
-              <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="selectedId = item.id">{{ t('knowledge.open') }}</button>
+              <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="selectedId = item.id">管理知识</button>
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(item)">{{ t('knowledge.edit') }}</button>
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--muted)]" @click="onDeleteBase(item)">{{ t('knowledge.delete') }}</button>
             </div>
@@ -873,8 +898,8 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               <p class="text-[11px] font-bold uppercase tracking-[.12em] text-[var(--muted)]">{{ meta(selected.provider).label }}</p>
               <h2 class="mt-1 text-2xl font-bold tracking-[-.03em]">{{ selected.name }}</h2>
               <p class="mt-1 text-sm text-[var(--muted)]">{{ selected.description || summaryLine(selected) }}</p>
-              <p v-if="supportsManage" class="mt-2 text-xs text-[var(--muted)]">{{ t('knowledge.stats', { docs: docStats.documentCount, chunks: docStats.chunkCount, backend: docStats.backend || '—' }) }}</p>
-              <p v-if="lastJobId" class="mt-1 text-[11px] text-[var(--muted)]">{{ t('knowledge.jobStatus', { id: lastJobId, status: lastJobStatus || '—' }) }}</p>
+              <p v-if="supportsManage" class="mt-2 text-xs text-[var(--muted)]">{{ t('knowledge.stats', { docs: docStats.documentCount, chunks: docStats.chunkCount, backend: docStats.backend || '未提供' }) }}</p>
+              <p v-if="lastJobId" class="mt-1 text-[11px] text-[var(--muted)]">{{ t('knowledge.jobStatus', { id: lastJobId, status: lastJobStatus || '未提供' }) }}</p>
               <p v-if="selected.indexState?.status" class="mt-1 text-[11px] text-[var(--muted)]">
                 Index status: {{ indexStatusLabel(selected) }}<span v-if="selected.indexState.signature"> · {{ selected.indexState.signature }}</span>
               </p>
@@ -887,16 +912,23 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(selected)">{{ t('knowledge.edit') }}</button>
             </div>
           </div>
-          <div class="mt-5 flex flex-wrap gap-2 border-t border-[var(--border)] pt-4">
+          <div class="mt-5 border-t border-[var(--border)] pt-4">
+            <p class="mb-2 text-[11px] font-semibold text-[var(--muted)]">知识工作流</p>
+            <div class="flex flex-wrap gap-2">
             <button
-              v-for="tab in detailTabs"
+              v-for="tab in primaryDetailTabs"
               :key="tab"
               type="button"
-              :class="['rounded-lg px-3 py-2 text-xs font-semibold transition', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']"
+              :class="['rounded-lg px-4 py-2.5 text-xs font-semibold transition', detailTab === tab ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)] hover:text-[var(--text)]']"
               @click="detailTab = tab"
             >
-              {{ tab === 'ontology' ? '本体与审核' : t(`knowledge.tab.${tab}`) }}
+              {{ detailTabLabel(tab) }}
             </button>
+            </div>
+            <div v-if="advancedDetailTabs.length" class="mt-3 flex flex-wrap items-center gap-1.5">
+              <span class="mr-1 text-[11px] text-[var(--muted)]">高级工具</span>
+              <button v-for="tab in advancedDetailTabs" :key="tab" type="button" :class="['rounded-md px-2.5 py-1.5 text-[11px] font-medium', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']" @click="detailTab = tab">{{ detailTabLabel(tab) }}</button>
+            </div>
           </div>
         </article>
 
@@ -969,11 +1001,17 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
         </article>
 
         <article v-if="detailTab === 'search'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-          <h3 class="text-base font-bold">{{ t('knowledge.searchTitle') }}</h3>
-          <p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.searchHelp') }}</p>
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div><h3 class="text-base font-bold">{{ t('knowledge.searchTitle') }}</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.searchHelp') }}</p></div>
+            <span class="rounded-lg bg-[var(--accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--accent)]">{{ selected.ontologyEnabled === false ? '向量检索' : '向量 + 本体 + 图谱证据' }}</span>
+          </div>
           <div class="mt-4 flex flex-wrap gap-2">
             <input v-model="searchQuery" class="min-w-[240px] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" :placeholder="t('knowledge.searchPlaceholder')" @keydown.enter.prevent="runSearch" />
             <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2.5 text-xs font-semibold text-white" :disabled="searching" @click="runSearch">{{ searching ? t('knowledge.searching') : t('knowledge.runSearch') }}</button>
+          </div>
+          <div v-if="searchStrategy" class="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 px-4 py-3 text-sm">
+            <strong>{{ searchStrategy === 'ontology-enhanced' ? '本次已使用本体增强召回' : '本次使用普通向量召回' }}</strong>
+            <p class="mt-1 text-xs text-[var(--muted)]">{{ searchStrategy === 'ontology-enhanced' ? '结果融合了原始向量、本体扩展词和图谱证据。' : '没有命中可用的正式本体，系统已自动使用向量检索。' }}</p>
           </div>
           <ul class="mt-5 space-y-3">
             <li v-for="hit in searchHits" :key="hit.id" class="rounded-xl border border-[var(--border)] px-4 py-3">
@@ -981,6 +1019,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
                 <p class="font-semibold">{{ hit.title }}</p>
                 <span class="text-[11px] text-[var(--muted)]">{{ (hit.score * 100).toFixed(1) }}%</span>
               </div>
+              <div v-if="hit.retrievalRoutes?.length" class="mt-2 flex flex-wrap gap-1.5"><span v-for="route in hit.retrievalRoutes" :key="route" class="rounded-md bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-semibold text-[var(--accent)]">{{ retrievalRouteLabel(route) }}</span></div>
               <p class="mt-2 text-sm leading-relaxed text-[var(--muted)]">{{ hit.content }}</p>
             </li>
           </ul>
