@@ -82,26 +82,76 @@ export function inferOntologyModel(graph: OntologyGraph): OntologyModel {
   const palette = ['#4f6be8','#0891b2','#059669','#d97706','#9333ea','#e11d48','#475569','#0d9488'];
   const entityTypes = [...new Set(graph.nodes.map((node) => node.type))].sort().map((type, index) => {
     const examples = graph.nodes.filter((node) => node.type === type), propertyNames = [...new Set(examples.flatMap((node) => Object.keys(node.properties).filter((key) => !key.startsWith('_') && !['documentId','chunkId'].includes(key))))];
-    return { id: modelId(type), name: type, description: `系统根据 ${examples.length} 个实体自动归纳`, color: palette[index % palette.length]!, allowAiCreate: true, properties: propertyNames.map((name) => { const values = examples.map((node) => node.properties[name]).filter((value) => value != null); return { id: modelId(name), name, dataType: inferDataType(values[0]), required: values.length === examples.length, description: '根据现有实体属性自动推断' }; }) };
+    return { id: modelId(type), name: type, description: `系统根据 ${examples.length} 个实体自动归纳`, color: palette[index % palette.length]!, allowAiCreate: true, reviewStatus: 'pending' as const, properties: propertyNames.map((name) => { const values = examples.map((node) => node.properties[name]).filter((value) => value != null); return { id: modelId(name), name, dataType: inferDataType(values[0]), required: values.length === examples.length, description: '根据现有实体属性自动推断' }; }) };
   });
   const nodeTypes = new Map(graph.nodes.map((node) => [node.id, node.type]));
-  const relationTypes = [...new Set(graph.edges.map((edge) => edge.predicate))].sort().map((predicate) => { const examples = graph.edges.filter((edge) => edge.predicate === predicate); return { id: modelId(predicate), name: predicate, description: `系统根据 ${examples.length} 条关系自动归纳`, subjectTypes: [...new Set(examples.map((edge) => nodeTypes.get(edge.subjectId)).filter((value): value is string => Boolean(value)))], objectTypes: [...new Set(examples.map((edge) => nodeTypes.get(edge.objectId)).filter((value): value is string => Boolean(value)))], allowAiCreate: true }; });
+  const relationTypes = [...new Set(graph.edges.map((edge) => edge.predicate))].sort().map((predicate) => { const examples = graph.edges.filter((edge) => edge.predicate === predicate); return { id: modelId(predicate), name: predicate, description: `系统根据 ${examples.length} 条关系自动归纳`, subjectTypes: [...new Set(examples.map((edge) => nodeTypes.get(edge.subjectId)).filter((value): value is string => Boolean(value)))], objectTypes: [...new Set(examples.map((edge) => nodeTypes.get(edge.objectId)).filter((value): value is string => Boolean(value)))], allowAiCreate: true, reviewStatus: 'pending' as const }; });
   return OntologyModelSchema.parse({ version: 1, entityTypes, relationTypes, updatedAt: Date.now() });
 }
-export async function readOntologyModel(kb: KnowledgeBaseRuntime) { return withDb(kb, false, (db) => { const raw = meta(db, 'ontology_model'); return raw ? OntologyModelSchema.parse(JSON.parse(raw)) : inferOntologyModel(workflow(db).draft); }); }
+function parseSavedOntologyModel(raw: string) { const value = JSON.parse(raw) as Record<string, any>; value.entityTypes = Array.isArray(value.entityTypes) ? value.entityTypes.map((item: Record<string, unknown>) => ({ reviewStatus: 'confirmed', ...item })) : []; value.relationTypes = Array.isArray(value.relationTypes) ? value.relationTypes.map((item: Record<string, unknown>) => ({ reviewStatus: 'confirmed', ...item })) : []; return OntologyModelSchema.parse(value); }
+export async function readOntologyModel(kb: KnowledgeBaseRuntime) { return withDb(kb, false, (db) => { const raw = meta(db, 'ontology_model'); return raw ? parseSavedOntologyModel(raw) : inferOntologyModel(workflow(db).draft); }); }
 export async function saveOntologyModel(kb: KnowledgeBaseRuntime, model: OntologyModel) { return withDb(kb, true, (db) => { const parsed = OntologyModelSchema.parse({ ...model, version: model.version + 1, updatedAt: Date.now() }); setMeta(db, 'ontology_model', JSON.stringify(parsed)); return parsed; }); }
 export function validateOntologyModel(graph: OntologyGraph, model: OntologyModel) {
-  const blockers: string[] = [], warnings: string[] = [], entityTypes = new Map(model.entityTypes.map((item) => [item.name, item])), relationTypes = new Map(model.relationTypes.map((item) => [item.name, item])), nodes = new Map(graph.nodes.map((node) => [node.id, node]));
-  for (const node of graph.nodes) { const definition = entityTypes.get(node.type); if (!definition) { warnings.push(`实体“${node.name}”使用了未纳入模型的类型“${node.type}”。`); continue; } for (const property of definition.properties) { const value = node.properties[property.name]; if (property.required && (value == null || value === '')) blockers.push(`实体“${node.name}”缺少必填属性“${property.name}”。`); if (value != null && value !== '') { const valid = property.dataType === 'number' ? typeof value === 'number' : property.dataType === 'boolean' ? typeof value === 'boolean' : property.dataType === 'date' ? typeof value === 'string' && !Number.isNaN(Date.parse(value)) : typeof value === 'string'; if (!valid) warnings.push(`实体“${node.name}”的“${property.name}”不是有效的${property.dataType === 'number'?'数字':property.dataType === 'boolean'?'布尔值':property.dataType === 'date'?'日期':'文本'}。`); } } }
-  for (const edge of graph.edges) { const definition = relationTypes.get(edge.predicate); if (!definition) { warnings.push(`关系“${edge.predicate}”尚未纳入模型规则。`); continue; } const subject = nodes.get(edge.subjectId), object = nodes.get(edge.objectId); if (subject && definition.subjectTypes.length && !definition.subjectTypes.includes(subject.type)) blockers.push(`关系“${edge.predicate}”不允许从“${subject.type}”类型发出。`); if (object && definition.objectTypes.length && !definition.objectTypes.includes(object.type)) blockers.push(`关系“${edge.predicate}”不允许指向“${object.type}”类型。`); }
+  const blockers: string[] = [], warnings: string[] = [];
+  const entityTypes = new Map(model.entityTypes.filter((item) => item.reviewStatus === 'confirmed').map((item) => [item.name, item]));
+  const relationTypes = new Map(model.relationTypes.filter((item) => item.reviewStatus === 'confirmed').map((item) => [item.name, item]));
+  const proposedEntityTypes = new Set(model.entityTypes.map((item) => item.name));
+  const proposedRelationTypes = new Set(model.relationTypes.map((item) => item.name));
+  const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  for (const node of graph.nodes) {
+    const definition = entityTypes.get(node.type);
+    if (!definition) {
+      if (!proposedEntityTypes.has(node.type)) warnings.push(`实体“${node.name}”使用了未纳入模型的类型“${node.type}”。`);
+      continue;
+    }
+    for (const property of definition.properties) {
+      const value = node.properties[property.name];
+      if (property.required && (value == null || value === '')) blockers.push(`实体“${node.name}”缺少必填属性“${property.name}”。`);
+      if (value != null && value !== '') {
+        const valid = property.dataType === 'number' ? typeof value === 'number' : property.dataType === 'boolean' ? typeof value === 'boolean' : property.dataType === 'date' ? typeof value === 'string' && !Number.isNaN(Date.parse(value)) : typeof value === 'string';
+        if (!valid) warnings.push(`实体“${node.name}”的“${property.name}”不是有效的${property.dataType === 'number'?'数字':property.dataType === 'boolean'?'布尔值':property.dataType === 'date'?'日期':'文本'}。`);
+      }
+    }
+  }
+  for (const edge of graph.edges) {
+    const definition = relationTypes.get(edge.predicate);
+    if (!definition) {
+      if (!proposedRelationTypes.has(edge.predicate)) warnings.push(`关系“${edge.predicate}”尚未纳入模型规则。`);
+      continue;
+    }
+    const subject = nodes.get(edge.subjectId), object = nodes.get(edge.objectId);
+    if (subject && definition.subjectTypes.length && !definition.subjectTypes.includes(subject.type)) blockers.push(`关系“${edge.predicate}”不允许从“${subject.type}”类型发出。`);
+    if (object && definition.objectTypes.length && !definition.objectTypes.includes(object.type)) blockers.push(`关系“${edge.predicate}”不允许指向“${object.type}”类型。`);
+  }
   return { blockers, warnings, score: Math.max(0, 100 - blockers.length * 15 - warnings.length * 3) };
 }
-export async function inspectOntologyModel(kb: KnowledgeBaseRuntime) { return withDb(kb, false, (db) => { const graph = workflow(db).draft, raw = meta(db, 'ontology_model'), model = raw ? OntologyModelSchema.parse(JSON.parse(raw)) : inferOntologyModel(graph), nodes = new Map(graph.nodes.map((node) => [node.id, node])); const usage = { entityTypes: model.entityTypes.map((definition) => { const examples = graph.nodes.filter((node) => node.type === definition.name); return { name: definition.name, count: examples.length, examples: examples.slice(0, 3).map((node) => node.name) }; }), relationTypes: model.relationTypes.map((definition) => { const examples = graph.edges.filter((edge) => edge.predicate === definition.name); return { name: definition.name, count: examples.length, examples: examples.slice(0, 3).map((edge) => ({ subject: nodes.get(edge.subjectId)?.name || edge.subjectId, object: nodes.get(edge.objectId)?.name || edge.objectId })) }; }) }; return { model, validation: validateOntologyModel(graph, model), usage, inferred: !raw }; }); }
+export async function inspectOntologyModel(kb: KnowledgeBaseRuntime) { return withDb(kb, false, (db) => { const graph = workflow(db).draft, raw = meta(db, 'ontology_model'), model = raw ? parseSavedOntologyModel(raw) : inferOntologyModel(graph), nodes = new Map(graph.nodes.map((node) => [node.id, node])); const usage = { entityTypes: model.entityTypes.map((definition) => { const examples = graph.nodes.filter((node) => node.type === definition.name); return { name: definition.name, count: examples.length, examples: examples.slice(0, 3).map((node) => node.name) }; }), relationTypes: model.relationTypes.map((definition) => { const examples = graph.edges.filter((edge) => edge.predicate === definition.name); return { name: definition.name, count: examples.length, examples: examples.slice(0, 3).map((edge) => ({ subject: nodes.get(edge.subjectId)?.name || edge.subjectId, object: nodes.get(edge.objectId)?.name || edge.objectId })) }; }) }; return { model, validation: validateOntologyModel(graph, model), usage, inferred: !raw }; }); }
 export async function saveOntologyDraft(kb: KnowledgeBaseRuntime, graph: OntologyGraph) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db); replaceWorkflow(db, { ...state, draft: { ...graph, version: Math.max(1, graph.version || 1) }, updatedAt: Date.now() }); return workflow(db); })); }
-export async function publishOntologyDraft(kb: KnowledgeBaseRuntime, metadata: { note?: string; publisher?: string } = {}) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db), validation = validateOntologyGraph(state.draft), modelRaw = meta(db, 'ontology_model'), modelValidation = modelRaw ? validateOntologyModel(state.draft, OntologyModelSchema.parse(JSON.parse(modelRaw))) : { blockers: [] }; if (validation.blockers.length + modelValidation.blockers.length) throw new Error(`发布前仍有 ${validation.blockers.length + modelValidation.blockers.length} 个阻断问题。`); const published = { ...state.draft, version: Math.max((state.published?.version || 0) + 1, state.draft.version || 1), nodes: state.draft.nodes.map((node) => ({ ...node, status: 'published' as const })), edges: state.draft.edges.map((edge) => ({ ...edge, status: 'published' as const })) }, candidates = state.candidates.map((candidate) => candidate.status === 'accepted' || candidate.status === 'staged' ? { ...candidate, status: 'committed' as const } : candidate), now = Date.now(); replaceWorkflow(db, { ...state, draft: published, published, candidates, updatedAt: now }); db.run('INSERT OR REPLACE INTO ontology_versions VALUES(?,?,?)', [published.version, JSON.stringify(published), now]); db.run('INSERT OR REPLACE INTO ontology_version_notes VALUES(?,?,?,?)', [published.version, metadata.note ?? null, metadata.publisher ?? null, now]); return workflow(db); })); }
+export async function publishOntologyDraft(kb: KnowledgeBaseRuntime, metadata: { note?: string; publisher?: string } = {}) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db), validation = validateOntologyGraph(state.draft), modelRaw = meta(db, 'ontology_model'), modelValidation = modelRaw ? validateOntologyModel(state.draft, parseSavedOntologyModel(modelRaw)) : { blockers: [] }; if (validation.blockers.length + modelValidation.blockers.length) throw new Error(`发布前仍有 ${validation.blockers.length + modelValidation.blockers.length} 个阻断问题。`); const published = { ...state.draft, version: Math.max((state.published?.version || 0) + 1, state.draft.version || 1), nodes: state.draft.nodes.map((node) => ({ ...node, status: 'published' as const })), edges: state.draft.edges.map((edge) => ({ ...edge, status: 'published' as const })) }, candidates = state.candidates.map((candidate) => candidate.status === 'staged' ? { ...candidate, status: 'committed' as const } : candidate), now = Date.now(); replaceWorkflow(db, { ...state, draft: published, published, candidates, updatedAt: now }); db.run('INSERT OR REPLACE INTO ontology_versions VALUES(?,?,?)', [published.version, JSON.stringify(published), now]); db.run('INSERT OR REPLACE INTO ontology_version_notes VALUES(?,?,?,?)', [published.version, metadata.note ?? null, metadata.publisher ?? null, now]); return workflow(db); })); }
 export async function importOntologyCandidates(kb: KnowledgeBaseRuntime, candidates: OntologyCandidate[]) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db), byId = new Map(state.candidates.map((c) => [c.id, c])); for (const candidate of candidates) byId.set(candidate.id, candidate); replaceWorkflow(db, { ...state, candidates: [...byId.values()], updatedAt: Date.now() }); return workflow(db); })); }
 export async function reviewOntologyCandidates(kb: KnowledgeBaseRuntime, ids: string[], decision: 'accepted' | 'rejected' | 'deferred', note?: string) { return withDb(kb, true, (db) => transaction(db, () => { const wanted = new Set(ids), state = workflow(db), candidates = state.candidates.map((c) => wanted.has(c.id) ? { ...c, status: decision, reviewedAt: Date.now(), ...(note ? { reviewNote: note } : {}) } : c); replaceWorkflow(db, { ...state, candidates, updatedAt: Date.now() }); return workflow(db); })); }
 export async function upsertOntologyCandidate(kb: KnowledgeBaseRuntime, candidate: OntologyCandidate) { return importOntologyCandidates(kb, [candidate]); }
+// Candidates and the successful chunk checkpoint are committed together. Replays
+// must not revert a human review, including rejection or staging.
+export async function saveOntologyExtractionBatch(kb: KnowledgeBaseRuntime, candidates: OntologyCandidate[], checkpoints: Array<{ key: string; candidateIds: string[] }>) {
+  return withDb(kb, true, (db) => transaction(db, () => {
+    const state = workflow(db), byId = new Map(state.candidates.map((candidate) => [candidate.id, candidate]));
+    for (const candidate of candidates) if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+    replaceWorkflow(db, { ...state, candidates: [...byId.values()], updatedAt: Date.now() });
+    for (const checkpoint of checkpoints) setMeta(db, `extraction.v1:${checkpoint.key}`, JSON.stringify(checkpoint.candidateIds));
+    return workflow(db);
+  }));
+}
+export async function readOntologyExtractionCheckpoints(kb: KnowledgeBaseRuntime, keys: string[]) {
+  return withDb(kb, false, (db) => {
+    const result: Record<string, string[]> = {};
+    for (const key of keys) {
+      const raw = meta(db, `extraction.v1:${key}`);
+      if (raw !== undefined) result[key] = JSON.parse(raw) as string[];
+    }
+    return { checkpoints: result, workflow: workflow(db) };
+  });
+}
 export async function deleteOntologyCandidates(kb: KnowledgeBaseRuntime, ids: string[]) { return withDb(kb, true, (db) => transaction(db, () => { const wanted = new Set(ids), state = workflow(db); replaceWorkflow(db, { ...state, candidates: state.candidates.filter((candidate) => !wanted.has(candidate.id)), updatedAt: Date.now() }); return workflow(db); })); }
 export async function mergeOntologyCandidates(kb: KnowledgeBaseRuntime, sourceIds: string[], mergedCandidate: OntologyCandidate) {
   return withDb(kb, true, (db) => transaction(db, () => {
@@ -149,8 +199,24 @@ export function validateOntologyGraph(graph: OntologyGraph) {
   const isolated = graph.nodes.filter((node) => !connected.has(node.id)).length; if (isolated) warnings.push(`存在 ${isolated} 个孤立实体。`);
   return { blockers, warnings, isolated };
 }
-export async function previewOntologyChanges(kb: KnowledgeBaseRuntime) { return withDb(kb, false, (db) => { const state = workflow(db), graph = graphWithAcceptedCandidates(state, governedCandidateTargets(db)), base = state.published || emptyGraph(), baseNodes = new Map(base.nodes.map((node) => [node.id, node])), baseEdges = new Map(base.edges.map((edge) => [edge.id, edge])); const summary = { addedNodes: graph.nodes.filter((node) => !baseNodes.has(node.id)).length, modifiedNodes: graph.nodes.filter((node) => baseNodes.has(node.id) && JSON.stringify(node) !== JSON.stringify(baseNodes.get(node.id))).length, deletedNodes: base.nodes.filter((node) => !graph.nodes.some((item) => item.id === node.id)).length, addedEdges: graph.edges.filter((edge) => !baseEdges.has(edge.id)).length, modifiedEdges: graph.edges.filter((edge) => baseEdges.has(edge.id) && JSON.stringify(edge) !== JSON.stringify(baseEdges.get(edge.id))).length, deletedEdges: base.edges.filter((edge) => !graph.edges.some((item) => item.id === edge.id)).length }; return { graph, summary, validation: validateOntologyGraph(graph) }; }); }
-export async function stageOntologyCandidates(kb: KnowledgeBaseRuntime) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db), draft = graphWithAcceptedCandidates(state), candidates = state.candidates.map((candidate) => candidate.status === 'accepted' ? { ...candidate, status: 'staged' as const } : candidate); replaceWorkflow(db, { ...state, draft, candidates, updatedAt: Date.now() }); return workflow(db); })); }
+export async function previewOntologyChanges(kb: KnowledgeBaseRuntime, options: { draftOnly?: boolean } = {}) { return withDb(kb, false, (db) => { const state = workflow(db), graph = options.draftOnly ? state.draft : graphWithAcceptedCandidates(state, governedCandidateTargets(db)), base = state.published || emptyGraph(), baseNodes = new Map(base.nodes.map((node) => [node.id, node])), baseEdges = new Map(base.edges.map((edge) => [edge.id, edge])); const summary = { addedNodes: graph.nodes.filter((node) => !baseNodes.has(node.id)).length, modifiedNodes: graph.nodes.filter((node) => baseNodes.has(node.id) && JSON.stringify(node) !== JSON.stringify(baseNodes.get(node.id))).length, deletedNodes: base.nodes.filter((node) => !graph.nodes.some((item) => item.id === node.id)).length, addedEdges: graph.edges.filter((edge) => !baseEdges.has(edge.id)).length, modifiedEdges: graph.edges.filter((edge) => baseEdges.has(edge.id) && JSON.stringify(edge) !== JSON.stringify(baseEdges.get(edge.id))).length, deletedEdges: base.edges.filter((edge) => !graph.edges.some((item) => item.id === edge.id)).length }; const structure = validateOntologyGraph(graph), modelRaw = meta(db, 'ontology_model'), model = modelRaw ? validateOntologyModel(graph, parseSavedOntologyModel(modelRaw)) : { blockers: [], warnings: [] }; return { graph, summary, validation: { ...structure, blockers: [...structure.blockers, ...model.blockers], warnings: [...structure.warnings, ...model.warnings] } }; }); }
+export async function stageOntologyCandidates(kb: KnowledgeBaseRuntime, candidateIds?: string[]) {
+  return withDb(kb, true, (db) => transaction(db, () => {
+    const state = workflow(db), wanted = candidateIds ? new Set(candidateIds) : undefined;
+    const selected = state.candidates.filter((candidate) => candidate.status === 'accepted' && (!wanted || wanted.has(candidate.id)));
+    const draft = graphWithAcceptedCandidates({ ...state, candidates: selected });
+    const nodeIds = new Set(draft.nodes.map((node) => node.id));
+    for (const candidate of selected) {
+      if (wanted && candidate.edge && (!nodeIds.has(candidate.edge.subjectId) || !nodeIds.has(candidate.edge.objectId))) {
+        throw new Error('所选关系缺少端点实体，请先接受对应实体，或暂缓这条关系。');
+      }
+    }
+    const stagedIds = new Set(selected.map((candidate) => candidate.id));
+    const candidates = state.candidates.map((candidate) => stagedIds.has(candidate.id) ? { ...candidate, status: 'staged' as const } : candidate);
+    replaceWorkflow(db, { ...state, draft, candidates, updatedAt: Date.now() });
+    return workflow(db);
+  }));
+}
 export async function repairOntologyDraft(kb: KnowledgeBaseRuntime) { return withDb(kb, true, (db) => transaction(db, () => { const state = workflow(db), nodeIds = new Set(state.draft.nodes.map((node) => node.id)), removedEdgeIds = state.draft.edges.filter((edge) => !nodeIds.has(edge.subjectId) || !nodeIds.has(edge.objectId)).map((edge) => edge.id), removed = new Set(removedEdgeIds), draft = { ...state.draft, edges: state.draft.edges.filter((edge) => !removed.has(edge.id)) }, candidates = state.candidates.map((candidate) => candidate.kind === 'edge' && candidate.edge && removed.has(candidate.edge.id) ? { ...candidate, status: 'deferred' as const, reviewedAt: Date.now(), reviewNote: '发布前校验：关系端点不存在，已自动暂缓。' } : candidate); replaceWorkflow(db, { ...state, draft, candidates, updatedAt: Date.now() }); return { workflow: workflow(db), removedEdgeIds }; })); }
 
 export type OntologyGovernanceIssue = { id: string; category: 'duplicate_node'|'naming'|'isolated_node'|'orphan_edge'|'self_loop'|'duplicate_edge'; severity: 'blocker'|'warning'; title: string; description: string; nodeIds: string[]; edgeIds: string[]; suggestedCommands: OntologyGovernanceCommand[] };

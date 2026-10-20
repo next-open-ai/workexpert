@@ -5,6 +5,37 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { commitOntologyCandidates, importOntologyCandidates, planOntologyQuery, publishOntologyDraft, readOntologyWorkflow, reviewOntologyCandidates, saveOntologyDraft } from '../ontology-runtime.js';
 
+test('ONT-27 checkpoints preserve review and staging is scoped, idempotent and unpublished', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'workexpert-incremental-'));
+  const kb = { id: 'incremental', name: 'Incremental', provider: 'lancedb' as const, enabled: true, dataDir: dir };
+  const runtime = await import('../ontology-runtime.js');
+  const candidate = (id: string) => ({ id, kind: 'node' as const, confidence: 1, status: 'pending' as const, node: { id, name: id, type: 'Concept', aliases: [], properties: {}, status: 'draft' as const }, evidence: [{ documentId: 'doc', chunkId: id, quote: id }] });
+  try {
+    await runtime.saveOntologyExtractionBatch(kb, [candidate('a'), candidate('b')], [{ key: 'content-model-v1', candidateIds: ['a', 'b'] }, { key: 'empty-v1', candidateIds: [] }]);
+    await reviewOntologyCandidates(kb, ['a', 'b'], 'accepted');
+    await runtime.saveOntologyExtractionBatch(kb, [candidate('a')], [{ key: 'content-model-v1', candidateIds: ['a', 'b'] }]);
+    const checkpoint = await runtime.readOntologyExtractionCheckpoints(kb, ['content-model-v1', 'empty-v1', 'changed-content']);
+    assert.deepEqual(checkpoint.checkpoints['empty-v1'], []);
+    assert.equal(checkpoint.checkpoints['changed-content'], undefined);
+    assert.equal(checkpoint.workflow.candidates.find(item => item.id === 'a')?.status, 'accepted');
+    const staged = await runtime.stageOntologyCandidates(kb, ['a']);
+    assert.deepEqual(staged.draft.nodes.map(item => item.id), ['a']);
+    assert.equal(staged.published, undefined);
+    assert.equal(staged.candidates.find(item => item.id === 'b')?.status, 'accepted');
+    assert.equal((await runtime.stageOntologyCandidates(kb, ['a'])).draft.nodes.length, 1);
+    const preview = await runtime.previewOntologyChanges(kb, { draftOnly: true });
+    assert.equal(preview.summary.addedNodes, 1);
+    assert.deepEqual(preview.graph.nodes.map(item => item.id), ['a']);
+    assert.equal((await runtime.previewOntologyChanges(kb)).summary.addedNodes, 2);
+    const published = await publishOntologyDraft(kb);
+    assert.deepEqual(published.published?.nodes.map(item => item.id), ['a']);
+    assert.equal(published.candidates.find(item => item.id === 'b')?.status, 'accepted');
+    await importOntologyCandidates(kb, [{ id: 'edge', kind: 'edge', confidence: 1, status: 'accepted', edge: { id: 'edge', subjectId: 'a', predicate: 'links', objectId: 'missing', properties: {}, status: 'draft' }, evidence: [{ documentId: 'doc', quote: 'links' }] }]);
+    await assert.rejects(runtime.stageOntologyCandidates(kb, ['edge']), /端点实体/);
+    assert.equal((await readOntologyWorkflow(kb)).draft.edges.length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('ontology draft, publish, candidate review and commit form a closed loop', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'workexpert-ontology-flow-'));
   const kb = { id: 'kb-flow', name: 'Flow', provider: 'lancedb' as const, enabled: true, dataDir: dir };
@@ -139,16 +170,20 @@ test('knowledge model is inferred, saved and validates friendly schema rules', a
     ], edges: [{ id: 'owns', subjectId: 'customer', predicate: '负责', objectId: 'project', properties: {}, status: 'draft' }] });
     const inferred = await runtime.inspectOntologyModel(kb);
     assert.equal(inferred.inferred, true);
+    assert.equal(inferred.model.entityTypes.every((item) => item.reviewStatus === 'pending'), true);
     assert.deepEqual(inferred.model.relationTypes[0]?.subjectTypes, ['客户']);
     assert.deepEqual(inferred.usage.entityTypes.find((item) => item.name === '客户')?.examples, ['客户A']);
     assert.deepEqual(inferred.usage.relationTypes[0]?.examples, [{ subject: '客户A', object: '项目X' }]);
     assert.equal(inferred.model.entityTypes.find((item) => item.name === '项目')?.properties[0]?.dataType, 'number');
     const customer = inferred.model.entityTypes.find((item) => item.name === '客户')!;
+    customer.reviewStatus = 'confirmed';
     customer.properties.push({ id: 'code', name: '客户编码', dataType: 'text', required: true });
     await runtime.saveOntologyModel(kb, inferred.model);
     const inspected = await runtime.inspectOntologyModel(kb);
     assert.equal(inspected.inferred, false);
     assert.equal(inspected.validation.blockers.some((item) => item.includes('客户编码')), true);
+    const preview = await runtime.previewOntologyChanges(kb, { draftOnly: true });
+    assert.deepEqual(preview.validation.blockers, inspected.validation.blockers);
     await assert.rejects(() => publishOntologyDraft(kb), /阻断问题/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

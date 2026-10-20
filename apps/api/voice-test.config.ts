@@ -1,5 +1,5 @@
 import { defineConfig } from 'tsup';
 export default defineConfig({
-  entry: { 'context-assembler.test': 'src/modules/orchestration/context-assembler.test.ts', 'asr.test': 'src/modules/voice/asr.test.ts', 'mobile-https-proxy.test': 'src/modules/chat-mobile/https-proxy.test.ts', 'knowledge-source.test': 'src/modules/knowledge/source-ingest.test.ts', 'knowledge-wiki.test': 'src/modules/knowledge/wiki-routes.test.ts', 'knowledge-ownership.test': 'src/modules/knowledge/ownership-routes.test.ts' }, format: ['esm'], platform: 'node', target: 'node22',
+  entry: { 'ontology-analysis-controls.test': 'src/modules/knowledge/ontology-analysis-controls.test.ts', 'context-assembler.test': 'src/modules/orchestration/context-assembler.test.ts', 'asr.test': 'src/modules/voice/asr.test.ts', 'mobile-https-proxy.test': 'src/modules/chat-mobile/https-proxy.test.ts', 'knowledge-source.test': 'src/modules/knowledge/source-ingest.test.ts', 'knowledge-wiki.test': 'src/modules/knowledge/wiki-routes.test.ts', 'knowledge-ownership.test': 'src/modules/knowledge/ownership-routes.test.ts' }, format: ['esm'], platform: 'node', target: 'node22',
   outDir: 'test-dist', clean: true, noExternal: ['@workexpert/contracts'], removeNodeProtocol: false,
 });

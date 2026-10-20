@@ -179,7 +179,7 @@ const detailTabs = computed((): DetailTab[] => (
     ? ['documents', ...(selected.value?.provider === 'lancedb' ? ['wiki' as const] : []), 'ontology', 'search', 'chunks', 'settings']
     : ['search', 'settings']
 ));
-const primaryDetailTabs = computed(() => detailTabs.value.filter((tab) => ['documents', 'wiki', 'ontology', 'search'].includes(tab)));
+const primaryDetailTabs = computed(() => detailTabs.value.filter((tab) => ['documents', 'wiki', 'ontology'].includes(tab)));
 const advancedDetailTabs = computed(() => detailTabs.value.filter((tab) => ['chunks', 'settings'].includes(tab)));
 const ingestFileBase64 = ref('');
 const ingestFileName = ref('');
@@ -1014,7 +1014,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             </div>
           </div>
           <nav class="border-t border-[var(--border)] bg-[var(--surface-muted)]/35 p-2.5" aria-label="知识库工作区">
-            <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div v-if="primaryDetailTabs.length" class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
             <button
               v-for="tab in primaryDetailTabs"
               :key="tab"
@@ -1032,6 +1032,26 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               <button v-for="tab in advancedDetailTabs" :key="tab" type="button" :class="['rounded-md px-2.5 py-1.5 text-[11px] font-medium', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']" @click="detailTab = tab">{{ detailTabLabel(tab) }}</button>
             </div>
           </nav>
+          <form
+            v-if="detailTabs.includes('search')"
+            class="flex flex-wrap items-center gap-3 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3"
+            @submit.prevent="detailTab = 'search'; runSearch()"
+          >
+            <div class="min-w-[150px]">
+              <strong class="block text-xs">召回验证</strong>
+              <span class="mt-0.5 block text-[10px] text-[var(--muted)]">用真实问题检查知识是否可被找到</span>
+            </div>
+            <label for="knowledge-quick-recall" class="sr-only">输入召回测试问题</label>
+            <input
+              id="knowledge-quick-recall"
+              v-model="searchQuery"
+              class="min-w-[240px] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+              placeholder="例如：退款未到账应该由谁处理？"
+            />
+            <button type="submit" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white active:scale-[0.98]" :disabled="searching">
+              {{ searching ? '正在验证' : '开始验证' }}
+            </button>
+          </form>
         </article>
 
         <article v-if="detailTab === 'documents' && supportsManage" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
@@ -1157,7 +1177,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
           </ul>
         </article>
 
-        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" @open-evidence="openOntologyEvidence" />
+        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :key="selected.id" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" @open-evidence="openOntologyEvidence" />
         <WikiWorkbench v-if="detailTab === 'wiki' && selected" :key="selected.id" :knowledge-base="toPayload(selected)" :initial-page-id="wikiPageId" :model="configured ? toModelPayload(activeConfig) : undefined" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">

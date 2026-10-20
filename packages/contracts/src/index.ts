@@ -526,6 +526,7 @@ export const OntologyEntityTypeDefinitionSchema = z.object({
   description: z.string().max(500).optional(),
   color: z.string().max(32).default('#4f6be8'),
   allowAiCreate: z.boolean().default(true),
+  reviewStatus: z.enum(['pending', 'confirmed', 'rejected']).default('pending'),
   properties: z.array(OntologyPropertyDefinitionSchema).max(100).default([]),
 });
 export const OntologyRelationTypeDefinitionSchema = z.object({
@@ -536,6 +537,7 @@ export const OntologyRelationTypeDefinitionSchema = z.object({
   objectTypes: z.array(z.string().min(1).max(120)).max(50).default([]),
   inverseName: z.string().max(120).optional(),
   allowAiCreate: z.boolean().default(true),
+  reviewStatus: z.enum(['pending', 'confirmed', 'rejected']).default('pending'),
 });
 export const OntologyModelSchema = z.object({
   version: z.number().int().positive().default(1),
@@ -545,11 +547,20 @@ export const OntologyModelSchema = z.object({
 });
 export type OntologyModel = z.infer<typeof OntologyModelSchema>;
 export const OntologyWorkflowRequestSchema = z.object({ knowledgeBase: KnowledgeBaseRuntimeSchema });
+export const OntologyCandidateStageRequestSchema = OntologyWorkflowRequestSchema.extend({ candidateIds: z.array(z.string().min(1)).max(1000).optional() });
+export const OntologyPreviewRequestSchema = OntologyWorkflowRequestSchema.extend({ draftOnly: z.boolean().default(false) });
+export const OntologyAnalysisBatchStateSchema = z.enum(['running', 'completed', 'failed', 'skipped']);
+export type OntologyAnalysisBatchState = z.infer<typeof OntologyAnalysisBatchStateSchema>;
+export const OntologyExtractionFailureCategorySchema = z.enum(['cancelled', 'provider_timeout', 'provider_http', 'schema_unsupported', 'output_truncated', 'invalid_output', 'evidence_invalid', 'provider_error', 'deferred_after_repeated_failure', 'user_skipped', 'user_stopped', 'unknown']);
+export type OntologyExtractionFailureCategory = z.infer<typeof OntologyExtractionFailureCategorySchema>;
+export const OntologyAnalysisCheckpointSchema = z.object({ candidateIds: z.array(z.string()).optional(), completedChunkIds: z.array(z.string()).optional(), skippedChunkIds: z.array(z.string()).optional(), stopRequested: z.boolean().optional() });
+export type OntologyAnalysisCheckpoint = z.infer<typeof OntologyAnalysisCheckpointSchema>;
 export const OntologyModelSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ model: OntologyModelSchema });
 export const OntologyDraftSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ graph: OntologyGraphSchema });
 export const OntologyCandidateImportRequestSchema = OntologyWorkflowRequestSchema.extend({ candidates: z.array(OntologyCandidateSchema).min(1).max(1000) });
 export const OntologyExtractRequestSchema = OntologyWorkflowRequestSchema.extend({
   documentIds: z.array(z.string().min(1).max(240)).min(1).max(20),
+  chunkIds: z.array(z.string().min(1).max(240)).max(200).optional(),
   instructions: z.string().max(2000).optional(),
   model: ModelConfigSchema,
   intensity: z.enum(['quick', 'standard', 'deep']).default('standard'),
@@ -566,6 +577,7 @@ export const OntologyCandidateMergeRequestSchema = OntologyWorkflowRequestSchema
 export const OntologyPublishRequestSchema = OntologyWorkflowRequestSchema.extend({ note: z.string().max(1000).optional(), publisher: z.string().max(120).optional() });
 export const OntologyVersionRequestSchema = OntologyWorkflowRequestSchema.extend({ version: z.number().int().positive() });
 export const OntologyAnalysisJobRequestSchema = z.object({ jobId: z.string().uuid() });
+export const OntologyAnalysisSkipRequestSchema = OntologyAnalysisJobRequestSchema.extend({ batchNumber: z.number().int().positive() });
 export const OntologyGovernanceCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('merge_nodes'), nodeIds: z.array(z.string().min(1)).min(2).max(20), canonicalId: z.string().min(1), canonicalName: z.string().min(1).max(240) }),
   z.object({ type: z.literal('rename_node'), nodeId: z.string().min(1), name: z.string().min(1).max(240), keepOldAsAlias: z.boolean().default(true) }),

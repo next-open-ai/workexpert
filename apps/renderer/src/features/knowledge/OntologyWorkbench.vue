@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
-  cancelOntologyAnalysis,
+  skipOntologyAnalysisBatch,
+  stopOntologyAnalysis,
   commitOntologyCandidates,
   deleteOntologyCandidates,
   getOntologyAnalysisStatus,
@@ -60,14 +61,39 @@ const draftText = ref("");
 const candidateText = ref("[]");
 const busy = ref(false);
 const analysisBusy = ref(false);
-const step = ref<1 | 2 | 3 | 4 | 5>(1);
-const furthestStep = ref<1 | 2 | 3 | 4 | 5>(1);
+type BuildStep = 1 | 2 | 3 | 4;
+const step = ref<BuildStep>(1);
+const buildProgress = ref<BuildStep>(1);
+const reviewManagerOpen = ref(false);
+const publicationOpen = ref(false);
+const qualitySkipped = ref(false);
 const skippedSteps = ref(new Set<number>());
 const intensity = ref<"quick" | "standard" | "deep">("standard");
 const analysisJob = ref<OntologyAnalysisJob | null>(null);
 const analysisJobId = ref("");
+const stoppingForReview = ref(false);
+const stoppingProgress = ref(0);
+const skippingBatches = ref(new Set<number>());
+const analysisControlError = ref('');
 let analysisTimer: ReturnType<typeof setInterval> | undefined;
 const candidateFilter = ref("pending");
+const candidateScopeIds = ref<Set<string> | null>(null);
+const reviewDialog = ref<HTMLDialogElement | null>(null);
+const reviewSaving = ref(false);
+const modalBulkDecision = ref<'accepted' | 'rejected' | null>(null);
+const reviewSaveError = ref('');
+const reviewChunkId = ref('');
+const modalCandidate = ref<OntologyWorkflowPayload['candidates'][number] | null>(null);
+async function saveModalCandidate() {
+  if (!modalCandidate.value) return;
+  reviewSaving.value = true;
+  try {
+    state.value = (await upsertOntologyCandidate(props.knowledgeBase, modalCandidate.value)).workflow;
+    modalCandidate.value = null;
+    reviewSaveError.value = '';
+  } catch (error) { reviewSaveError.value = error instanceof Error ? error.message : String(error); }
+  finally { reviewSaving.value = false; }
+}
 const selectedCandidate = ref<Candidate | null>(null);
 const graphEditCandidateId = ref("");
 const candidatePropertiesText = ref("{}");
@@ -75,6 +101,8 @@ const bulkDecision = ref<"accepted" | "rejected" | null>(null);
 const preview = ref<OntologyPreviewPayload | null>(null);
 const versions = ref<OntologyVersionPayload[]>([]);
 const publishNote = ref("");
+const publicationBusy = ref(false);
+const publicationError = ref('');
 const analysisError = ref("");
 const analysisResult = ref("");
 const advancedOpen = ref(false);
@@ -85,24 +113,33 @@ const verificationBusy = ref(false);
 const verificationError = ref("");
 const verificationPlan = ref<OntologyQueryPlanPayload | null>(null);
 const verificationResult = ref<OntologyHybridSearchPayload | null>(null);
-const pending = computed(
-  () =>
-    state.value?.candidates.filter((item) => item.status === "pending") || [],
-);
+const scopedCandidates = computed(() => {
+  const candidates = state.value?.candidates || [];
+  return candidateScopeIds.value
+    ? candidates.filter((item) => candidateScopeIds.value!.has(item.id))
+    : candidates;
+});
+const pending = computed(() => scopedCandidates.value.filter((item) => item.status === "pending"));
+const reviewChunks = computed(() => [...new Set(scopedCandidates.value.flatMap(item => item.evidence.map(evidence => evidence.chunkId).filter((id): id is string => Boolean(id))))]);
+const modalReviewCandidates = computed(() => scopedCandidates.value.filter(item => !reviewChunkId.value || item.evidence.some(evidence => evidence.chunkId === reviewChunkId.value)));
+const modalEditableCandidates = computed(() => modalReviewCandidates.value.filter(item => item.status !== 'staged' && item.status !== 'committed'));
+const modalAcceptIds = computed(() => modalEditableCandidates.value.filter(item => item.status !== 'accepted').map(item => item.id));
+const modalRejectIds = computed(() => modalEditableCandidates.value.filter(item => item.status !== 'rejected').map(item => item.id));
 const accepted = computed(
   () =>
-    state.value?.candidates.filter(
+    scopedCandidates.value.filter(
       (item) => item.status === "accepted" || item.status === "staged",
-    ) || [],
+    ),
 );
 const deferred = computed(
-  () =>
-    state.value?.candidates.filter((item) => item.status === "deferred") || [],
+  () => scopedCandidates.value.filter((item) => item.status === "deferred"),
 );
 const rejected = computed(
-  () =>
-    state.value?.candidates.filter((item) => item.status === "rejected") || [],
+  () => scopedCandidates.value.filter((item) => item.status === "rejected"),
 );
+const historicalCandidateCount = computed(() => Math.max(0, (state.value?.candidates.length || 0) - scopedCandidates.value.length));
+const publishedGraphCounts = computed(() => ({ nodes: state.value?.published?.nodes.length || 0, edges: state.value?.published?.edges.length || 0 }));
+const draftGraphCounts = computed(() => ({ nodes: (preview.value?.graph || state.value?.draft)?.nodes.length || 0, edges: (preview.value?.graph || state.value?.draft)?.edges.length || 0 }));
 const selectableDocuments = computed(() => documents.value.slice(0, 20));
 const selectedDocuments = computed(() =>
   documents.value.filter((item) => selectedDocumentIds.value.includes(item.id)),
@@ -153,7 +190,12 @@ watch(
 );
 const analysisPercent = computed(() => {
   if (!analysisJob.value) return 0;
+  if (stoppingForReview.value && analysisBusy.value) return stoppingProgress.value;
   if (analysisJob.value.status === "completed") return 100;
+  if (analysisJob.value.status === "partial" && analysisJob.value.result) {
+    const total = analysisJob.value.result.analyzedChunks + analysisJob.value.result.failedChunkIds.length;
+    return total ? Math.round(100 * analysisJob.value.result.analyzedChunks / total) : 0;
+  }
   const phase = analysisPhases.indexOf(analysisJob.value.phase);
   if (phase < 0) return 5;
   if (phase === 0) return 12;
@@ -172,8 +214,12 @@ const analysisPercent = computed(() => {
   return 96;
 });
 const analysisStatusLabel = computed(() =>
-  analysisJob.value?.status === "completed"
+  analysisJob.value?.stopRequested
+    ? analysisBusy.value ? '正在停止并保存' : '已停止，结果已保存'
+    : analysisJob.value?.status === "completed"
     ? "识别完成"
+    : analysisJob.value?.status === "partial"
+      ? "部分完成"
     : analysisJob.value?.status === "failed"
       ? "识别失败"
       : analysisJob.value?.status === "cancelled"
@@ -182,6 +228,27 @@ const analysisStatusLabel = computed(() =>
           ? "正在识别"
           : "准备中",
 );
+const primaryAnalysisFailure = computed(() =>
+  analysisJob.value?.failures?.find((failure) => failure.category !== "deferred_after_repeated_failure") ||
+  analysisJob.value?.result?.failures?.find((failure) => failure.category !== "deferred_after_repeated_failure"),
+);
+const analysisFailureSummary = computed(() => {
+  const failure = primaryAnalysisFailure.value;
+  if (!failure) return "部分切片未完成，系统已保留检查点。";
+  const labels: Record<string, string> = {
+    provider_timeout: "模型服务在限定时间内未返回完整结果",
+    provider_http: "模型服务返回了请求错误",
+    schema_unsupported: "当前模型不兼容严格结构化输出",
+    output_truncated: "模型输出达到长度上限，结果被截断",
+    invalid_output: "模型返回的结构化内容不完整",
+    evidence_invalid: "模型证据未能通过原文核验",
+    provider_error: "模型服务连接中断",
+    user_skipped: "已按你的选择跳过部分切片，可稍后继续",
+    user_stopped: "已按你的选择停止分析，已有结果已保存",
+    unknown: "模型请求发生未分类异常",
+  };
+  return labels[failure.category] || failure.message;
+});
 const friendlyAnalysisError = computed(() => {
   const message = analysisError.value;
   if (/terminated|连接暂时中断|fetch failed|failed to fetch|econnreset|socket|timed?\s*out|timeout/i.test(message)) {
@@ -242,11 +309,16 @@ function annotateChanges(graph: { version: number; nodes: unknown[]; edges: unkn
 }
 const activeGraph = computed(() => annotateChanges(graphSource.value === "draft" ? preview.value?.graph || state.value?.draft : state.value?.published));
 const hasGraphContent = computed(() => Boolean(state.value?.published?.nodes.length || state.value?.draft.nodes.length));
+const hasDraftContent = computed(() => Boolean(state.value?.draft.nodes.length || state.value?.draft.edges.length));
+const unstagedTaskCandidates = computed(() => {
+  const ids = new Set(analysisJob.value?.candidateIds || analysisJob.value?.result?.candidateIds || []);
+  return (state.value?.candidates || []).filter(item => ids.has(item.id) && (item.status === 'pending' || item.status === 'accepted'));
+});
 const canSkipQuality = computed(() => Boolean(preview.value && preview.value.validation.blockers.length === 0 && preview.value.validation.warnings.length === 0));
 const candidateGraph = computed(() => {
   const baseNodes = (state.value?.draft.nodes || []) as Array<Record<string, unknown>>;
   const baseEdges = (state.value?.draft.edges || []) as Array<Record<string, unknown>>;
-  const candidates = (state.value?.candidates || []).filter((item) => item.status !== "rejected" && item.status !== "deferred");
+  const candidates = scopedCandidates.value.filter((item) => item.status !== "rejected" && item.status !== "deferred");
   const evidenceProperties = (item: Candidate) => ({ documentId: item.evidence[0]?.documentId, chunkId: item.evidence[0]?.chunkId, _confidence: item.confidence, _change: "added" });
   const nodes: Array<Record<string, unknown>> = [...baseNodes, ...candidates.filter((item) => item.kind === "node" && item.node).map((item) => ({ ...(item.node as Record<string, unknown>), source: item.evidence[0]?.source, properties: { ...((item.node?.properties || {}) as object), ...evidenceProperties(item) } }) as Record<string, unknown>)];
   const uniqueNodes = [...new Map(nodes.map((node) => [String(node.id), node])).values()];
@@ -256,53 +328,71 @@ const candidateGraph = computed(() => {
 });
 function canOpenStep(target: number) {
   if (target === 1) return true;
-  if (target === 2) return Boolean(analysisJob.value);
-  if (target === 3)
-    return (
-      analysisJob.value?.status === "completed" ||
-      Boolean(state.value?.candidates.length)
-    );
-  if (target === 4) return Boolean(preview.value);
-  return (
-    Boolean(state.value?.published) ||
-    Boolean(preview.value && !preview.value.validation.blockers.length)
-  );
+  if (target === 2) return Boolean(analysisJob.value || state.value?.candidates.length || reviewManagerOpen.value);
+  if (target === 3) return hasDraftContent.value || Boolean(analysisJob.value?.stopRequested);
+  return target === 4 && Boolean(state.value?.published);
 }
-function openStep(target: 1 | 2 | 3 | 4 | 5) {
-  if (canOpenStep(target)) step.value = target;
+async function openStep(target: BuildStep) {
+  if (!canOpenStep(target)) return;
+  if (target === 2 && !analysisJob.value) reviewManagerOpen.value = true;
+  try {
+    if (target === 3) {
+      await refreshPreview();
+      await loadVersions();
+    }
+    step.value = target;
+  } catch (error) { notify.error(error, 'notify.saveFailed'); }
 }
 function progressState(target: number) {
+  const current = analysisBusy.value ? 2 : buildProgress.value;
   if (skippedSteps.value.has(target)) return "skipped";
-  if (target < furthestStep.value) return "completed";
-  if (target === furthestStep.value) return "current";
+  if (target < current) return "completed";
+  if (target === current) return "current";
   return "upcoming";
 }
 function progressShape(target: number) {
   return {
     clipPath: target === 1
       ? "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%)"
-      : target === 5
+      : target === 4
         ? "polygon(0 0, 100% 0, 100% 100%, 0 100%, 12px 50%)"
         : "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%, 12px 50%)",
   };
 }
 function startAiBuild() {
   workspaceMode.value = "workflow";
+  if (analysisJob.value) {
+    step.value = 2;
+    reviewManagerOpen.value = false;
+    return;
+  }
   skippedSteps.value = new Set();
-  furthestStep.value = 1;
+  candidateScopeIds.value = null;
+  buildProgress.value = 1;
   step.value = 1;
+}
+function openRunningAnalysis() {
+  if (!analysisJob.value) return;
+  workspaceMode.value = "workflow";
+  step.value = 2;
+  reviewManagerOpen.value = false;
 }
 async function startManualBuild() {
   workspaceMode.value = "workflow";
-  skippedSteps.value = new Set([1, 2]);
-  furthestStep.value = 3;
-  step.value = 3;
+  candidateScopeIds.value = null;
+  skippedSteps.value = new Set([1]);
+  buildProgress.value = 2;
+  step.value = 2;
+  reviewManagerOpen.value = true;
   await addEntity();
 }
 async function skipQualityCheck() {
+  await refreshPreview();
   if (!canSkipQuality.value) return;
-  skippedSteps.value = new Set([...skippedSteps.value, 4]);
-  step.value = 5;
+  qualitySkipped.value = true;
+  publicationOpen.value = true;
+  buildProgress.value = 3;
+  step.value = 3;
   await loadVersions();
 }
 async function editGraphItem(item: { kind: "node" | "edge"; value: Record<string, unknown> }) {
@@ -365,12 +455,12 @@ async function load() {
     ]);
     state.value = workflow.workflow;
     if (!state.value.published && state.value.draft.nodes.length) graphSource.value = "draft";
-    furthestStep.value = state.value.published
-      ? 5
+    buildProgress.value = state.value.published
+      ? 4
       : state.value.draft.nodes.length
-        ? 4
+        ? 3
         : state.value.candidates.length
-          ? 3
+          ? 2
           : analysisJob.value
             ? 2
             : 1;
@@ -400,6 +490,11 @@ const analysisPhases = [
 ];
 function phaseState(label: string) {
   if (!analysisJob.value) return "等待中";
+  if (analysisJob.value.status === "partial") {
+    if (label === "AI 识别") return `${Math.max(0, analysisJob.value.totalBatches - (analysisJob.value.failedBatches || 0))} / ${analysisJob.value.totalBatches} 批完成`;
+    if (label === "候选归并") return "已保存";
+    return "已完成";
+  }
   const mapped: Record<string, string> = {
     证据核验: "证据核验与候选归并",
     候选归并: "候选归并完成",
@@ -434,11 +529,18 @@ async function pollAnalysis() {
     const response = await getOntologyAnalysisStatus(analysisJobId.value);
     analysisJob.value = response.job;
     analysisBusy.value = response.job.status === "running";
-    if (response.job.status === "completed" && response.job.result) {
-      state.value = response.job.result.workflow;
+    if ((response.job.status === "completed" || response.job.status === "partial") && response.job.result) {
+      state.value = (await readOntologyWorkflow(props.knowledgeBase)).workflow;
       analysisResult.value = `已分析 ${response.job.result.analyzedChunks} 个切片，识别 ${response.job.result.nodes} 个实体和 ${response.job.result.edges} 条关系。`;
-      localStorage.removeItem(`ontology-job:${props.knowledgeBase.id}`);
-      step.value = 3;
+      await refreshPreview();
+      if (stoppingForReview.value || response.job.stopRequested) {
+        stoppingForReview.value = false;
+        workspaceMode.value = 'workflow';
+        step.value = 3;
+        buildProgress.value = 3;
+        publicationOpen.value = false;
+        reviewManagerOpen.value = false;
+      }
       if (analysisTimer) clearInterval(analysisTimer);
     } else if (
       response.job.status === "failed" ||
@@ -465,6 +567,10 @@ async function analyzeDocuments() {
   analysisBusy.value = true;
   analysisError.value = "";
   analysisResult.value = "";
+  reviewManagerOpen.value = false;
+  publicationOpen.value = false;
+  buildProgress.value = 2;
+  skippedSteps.value = new Set();
   step.value = 2;
   try {
     const result = await startOntologyAnalysis({
@@ -487,9 +593,107 @@ async function analyzeDocuments() {
       error instanceof Error ? error.message : String(error);
   }
 }
-async function cancelAnalysis() {
-  if (analysisJobId.value) await cancelOntologyAnalysis(analysisJobId.value);
-  await pollAnalysis();
+async function retryRemainingAnalysis() {
+  if (!analysisJob.value?.result?.failedChunkIds.length || !props.model) return;
+  analysisBusy.value = true;
+  analysisError.value = "";
+  try {
+    const result = await startOntologyAnalysis({
+      knowledgeBase: props.knowledgeBase,
+      documentIds: selectedDocumentIds.value,
+      chunkIds: analysisJob.value.result.failedChunkIds,
+      instructions: instructions.value.trim() || undefined,
+      model: props.model,
+      intensity: intensity.value,
+    });
+    analysisJobId.value = result.jobId;
+    localStorage.setItem(`ontology-job:${props.knowledgeBase.id}`, result.jobId);
+    await pollAnalysis();
+    analysisTimer = setInterval(pollAnalysis, 1200);
+  } catch (error) {
+    analysisBusy.value = false;
+    analysisError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+async function skipAnalysisBatch(batchNumber: number) {
+  if (!analysisJobId.value || skippingBatches.value.has(batchNumber) || analysisJob.value?.stopRequested) return;
+  skippingBatches.value = new Set([...skippingBatches.value, batchNumber]);
+  analysisControlError.value = '';
+  try {
+    await skipOntologyAnalysisBatch(analysisJobId.value, batchNumber);
+    await pollAnalysis();
+  } catch (error) {
+    analysisControlError.value = error instanceof Error ? error.message : String(error);
+    await pollAnalysis();
+  } finally { skippingBatches.value = new Set([...skippingBatches.value].filter(id => id !== batchNumber)); }
+}
+async function stopAnalysisAndCheck() {
+  if (!analysisJobId.value || stoppingForReview.value) return;
+  stoppingProgress.value = analysisPercent.value;
+  stoppingForReview.value = true;
+  analysisControlError.value = '';
+  try {
+    analysisJob.value = (await stopOntologyAnalysis(analysisJobId.value)).job;
+    await pollAnalysis();
+    if (analysisBusy.value) {
+      if (analysisTimer) clearInterval(analysisTimer);
+      analysisTimer = setInterval(pollAnalysis, 1200);
+    }
+  } catch (error) {
+    stoppingForReview.value = false;
+    analysisControlError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+async function reviewAvailableCandidates() {
+  const response = await readOntologyWorkflow(props.knowledgeBase);
+  state.value = response.workflow;
+  const ids = analysisJob.value?.candidateIds || analysisJob.value?.result?.candidateIds || [];
+  candidateScopeIds.value = new Set(ids);
+  reviewSaveError.value = '';
+  modalCandidate.value = null;
+  reviewChunkId.value = '';
+  reviewDialog.value?.showModal();
+}
+async function saveReviewedToDraft() {
+  if (reviewSaving.value) return;
+  reviewSaving.value = true;
+  reviewSaveError.value = '';
+  try {
+    const ids = modalReviewCandidates.value.filter((item) => item.status === 'accepted').map((item) => item.id);
+    state.value = (await stageOntologyCandidates(props.knowledgeBase, ids)).workflow;
+    await refreshPreview();
+    if (!analysisBusy.value) buildProgress.value = 3;
+    reviewDialog.value?.close();
+    notify.pushRaw('success', '已加入草稿，尚未发布', '分析不受影响。可以继续审核，也可以前往 AI 优化检查后单独发布。');
+  } catch (error) {
+    reviewSaveError.value = error instanceof Error ? error.message : String(error);
+  } finally { reviewSaving.value = false; }
+}
+async function reviewAllInModal(decision: 'accepted' | 'rejected') {
+  if (reviewSaving.value || modalCandidate.value) return;
+  const ids = [...(decision === 'accepted' ? modalAcceptIds.value : modalRejectIds.value)];
+  if (!ids.length) return;
+  reviewSaving.value = true;
+  modalBulkDecision.value = decision;
+  reviewSaveError.value = '';
+  try {
+    // The review API accepts at most 1000 IDs per request.
+    for (let offset = 0; offset < ids.length; offset += 1000) {
+      state.value = (await reviewOntologyCandidates(props.knowledgeBase, ids.slice(offset, offset + 1000), decision)).workflow;
+    }
+  } catch (error) {
+    reviewSaveError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    reviewSaving.value = false;
+    modalBulkDecision.value = null;
+  }
+}
+async function showAllCandidates() {
+  try {
+    state.value = (await readOntologyWorkflow(props.knowledgeBase)).workflow;
+    candidateScopeIds.value = null;
+    reviewManagerOpen.value = true;
+  } catch (error) { notify.error(error, 'notify.saveFailed'); }
 }
 async function refreshPreview() {
   preview.value = await previewOntologyChanges(props.knowledgeBase);
@@ -509,23 +713,35 @@ async function openGraphGovernance() {
 }
 function openManualEntity() {
   workspaceMode.value = "workflow";
-  step.value = 3;
+  buildProgress.value = 2;
+  candidateScopeIds.value = null;
+  step.value = 2;
+  reviewManagerOpen.value = true;
   void addEntity();
 }
 function openManualRelation() {
   workspaceMode.value = "workflow";
-  step.value = 3;
+  buildProgress.value = 2;
+  candidateScopeIds.value = null;
+  step.value = 2;
+  reviewManagerOpen.value = true;
   void addRelation();
 }
 async function proceedToReview() {
-  state.value = (await stageOntologyCandidates(props.knowledgeBase)).workflow;
-  await refreshPreview();
-  step.value = 4;
+  try {
+    const ids = scopedCandidates.value.filter(item => item.status === 'accepted').map(item => item.id);
+    state.value = (await stageOntologyCandidates(props.knowledgeBase, ids)).workflow;
+    await refreshPreview();
+    buildProgress.value = 3;
+    publicationOpen.value = false;
+    step.value = 3;
+  } catch (error) { notify.error(error, 'notify.saveFailed'); }
 }
 async function loadVersions() {
   versions.value = (await listOntologyVersions(props.knowledgeBase)).versions;
 }
 async function publishVersion() {
+  if (publicationBusy.value) return;
   if (!props.isAdmin) {
     notify.pushRaw(
       "warning",
@@ -534,17 +750,26 @@ async function publishVersion() {
     );
     return;
   }
-  if (preview.value?.validation.blockers.length) return;
-  state.value = (
-    await publishOntologyDraft(props.knowledgeBase, publishNote.value)
-  ).workflow;
-  await loadVersions();
-  step.value = 5;
-  notify.pushRaw(
-    "success",
-    "本体版本已发布",
-    `当前版本 v${state.value.published?.version}`,
-  );
+  publicationBusy.value = true;
+  publicationError.value = '';
+  try {
+    await refreshPreview();
+    if (!preview.value || preview.value.validation.blockers.length) {
+      publicationOpen.value = false;
+      return;
+    }
+    state.value = (await publishOntologyDraft(props.knowledgeBase, publishNote.value)).workflow;
+    buildProgress.value = 4;
+    step.value = 4;
+    verificationPlan.value = null;
+    verificationResult.value = null;
+    verificationError.value = '';
+    await refreshPreview();
+    await loadVersions();
+    notify.pushRaw('success', '本体版本已发布', `当前版本 v${state.value.published?.version}，现在可以输入问题验证召回效果。`);
+  } catch (error) {
+    publicationError.value = error instanceof Error ? error.message : String(error);
+  } finally { publicationBusy.value = false; }
 }
 async function removeCandidate(id: string) {
   state.value = (
@@ -739,13 +964,15 @@ async function review(
   id: string,
   decision: "accepted" | "rejected" | "deferred",
 ) {
+  if (reviewSaving.value) return;
+  reviewSaving.value = true;
   try {
     state.value = (
       await reviewOntologyCandidates(props.knowledgeBase, [id], decision)
     ).workflow;
   } catch (error) {
     notify.error(error, "notify.saveFailed");
-  }
+  } finally { reviewSaving.value = false; }
 }
 async function reviewAll(decision: "accepted" | "rejected") {
   if (!pending.value.length) return;
@@ -842,9 +1069,6 @@ function candidateMeta(item: Candidate) {
     : `${String(item.edge?.subjectId || "?")} → ${String(item.edge?.objectId || "?")}`;
 }
 watch(() => props.knowledgeBase.id, load);
-watch(step, (value) => {
-  if (value > furthestStep.value) furthestStep.value = value;
-});
 onMounted(async () => {
   await load();
   const saved = localStorage.getItem(`ontology-job:${props.knowledgeBase.id}`);
@@ -852,6 +1076,16 @@ onMounted(async () => {
     analysisJobId.value = saved;
     step.value = 2;
     await pollAnalysis();
+    const ids = new Set(analysisJob.value?.candidateIds || analysisJob.value?.result?.candidateIds || []);
+    const taskCandidates = (state.value?.candidates || []).filter(item => ids.has(item.id));
+    const unfinished = analysisJob.value?.status !== 'completed' || taskCandidates.some(item => ['pending', 'accepted', 'deferred'].includes(item.status));
+    buildProgress.value = unfinished ? 2
+      : preview.value && Object.values(preview.value.summary).some(count => count > 0) ? 3
+        : state.value?.published && taskCandidates.length && taskCandidates.every(item => item.status === 'committed') ? 4 : 2;
+    if (analysisJob.value?.stopRequested) {
+      if (analysisBusy.value) stoppingForReview.value = true;
+      else { step.value = 3; buildProgress.value = 3; publicationOpen.value = false; }
+    }
     if (analysisJob.value?.status === "running")
       analysisTimer = setInterval(pollAnalysis, 1200);
   }
@@ -862,43 +1096,31 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="grid gap-4">
-    <section class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <div class="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-      <div class="flex items-center gap-3">
-        <span
-          class="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm"
-          >◎</span
-        >
+  <div class="ontology-workbench grid gap-4">
+    <section class="ontology-workspace-header">
+      <div class="ontology-workspace-heading">
         <div>
-          <h3 class="font-semibold">业务本体工作台</h3>
-          <p class="mt-0.5 text-xs text-[var(--muted)]">
-            用实体、关系和规则表达业务逻辑，并为混合召回提供可解释的知识路径。
-          </p>
+          <h3>业务本体工作台</h3>
+          <p>构建业务知识，维护实体关系，验证召回效果。</p>
         </div>
+        <button class="ontology-rules-button" :class="{ 'is-active': workspaceMode === 'model' }" :aria-pressed="workspaceMode === 'model'" @click="workspaceMode = 'model'">业务知识规则 <span aria-hidden="true">↗</span></button>
       </div>
-      <span class="rounded-md bg-indigo-50 px-2.5 py-1.5 text-[10px] font-bold tracking-wide text-indigo-700">ONTOLOGY</span>
-      </div>
-      <nav class="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--surface-muted)]/40 p-2 text-xs font-semibold" aria-label="业务本体工具">
-        <div class="flex flex-wrap items-stretch gap-1">
-        <button
-          class="rounded-lg px-4 py-2.5 transition"
-          :class="
-            workspaceMode === 'graph'
-              ? 'bg-[var(--surface)] text-[var(--accent)] shadow-sm ring-1 ring-[var(--border)]'
-              : 'text-[var(--muted)] hover:bg-[var(--surface)]'
-          "
-          @click="openGraph()"
-        >
-          本体图谱</button
-        ><button
-          class="rounded-lg px-4 py-2.5 transition active:scale-[0.98]"
-          :class="workspaceMode === 'workflow' ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-[var(--accent)] hover:bg-[var(--accent-soft)]'"
-          @click="startAiBuild"
-        >AI 辅助构建</button
-        ><button class="rounded-lg px-4 py-2.5 transition" :class="workspaceMode === 'quality' ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-[var(--accent)] hover:bg-[var(--accent-soft)]'" @click="workspaceMode = 'quality'">AI 优化</button>
-        </div>
-        <div class="flex items-center gap-2 border-l border-[var(--border)] pl-2"><span class="hidden text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--muted)] sm:inline">知识规范</span><button class="rounded-lg px-4 py-2.5 transition" :class="workspaceMode === 'model' ? 'bg-[var(--surface)] text-[var(--accent)] shadow-sm ring-1 ring-[var(--border)]' : 'text-[var(--muted)] hover:bg-[var(--surface)]'" @click="workspaceMode = 'model'">业务知识规则</button></div>
+      <nav class="ontology-mode-navigation" aria-label="业务本体主导航">
+        <button class="ontology-mode-button" :class="{ 'is-active': workspaceMode === 'graph' }" :aria-pressed="workspaceMode === 'graph'" :title="`已发布：${publishedGraphCounts.nodes} 个实体、${publishedGraphCounts.edges} 条关系；草稿：${draftGraphCounts.nodes} 个实体、${draftGraphCounts.edges} 条关系`" @click="openGraph()">
+          <span class="ontology-mode-icon" aria-hidden="true">◎</span>
+          <span class="ontology-mode-copy"><strong>本体图谱</strong><span>实体：已发布 {{ publishedGraphCounts.nodes }} · 草稿 {{ draftGraphCounts.nodes }}</span></span>
+          <span class="ontology-mode-arrow" aria-hidden="true">→</span>
+        </button>
+        <button class="ontology-mode-button" :class="{ 'is-active': workspaceMode === 'workflow' }" :aria-pressed="workspaceMode === 'workflow'" @click="startAiBuild">
+          <span class="ontology-mode-icon ontology-mode-icon-ai" aria-hidden="true">AI</span>
+          <span class="ontology-mode-copy"><strong>AI 辅助构建</strong><span>{{ analysisBusy ? '任务进行中 · 查看分析与审核' : '从文档识别实体、关系与证据' }}</span></span>
+          <span class="ontology-mode-arrow" aria-hidden="true">→</span>
+        </button>
+        <button class="ontology-mode-button" :class="{ 'is-active': workspaceMode === 'quality' }" :aria-pressed="workspaceMode === 'quality'" @click="openGraphGovernance">
+          <span class="ontology-mode-icon" aria-hidden="true">↗</span>
+          <span class="ontology-mode-copy"><strong>AI 优化</strong><span>检查图谱问题，完善业务知识</span></span>
+          <span class="ontology-mode-arrow" aria-hidden="true">→</span>
+        </button>
       </nav>
     </section>
 
@@ -914,34 +1136,38 @@ onUnmounted(() => {
     </section>
 
     <OntologyModelPanel v-if="workspaceMode === 'model'" :knowledge-base="knowledgeBase" />
-    <OntologyGovernancePanel v-if="workspaceMode === 'quality'" :knowledge-base="knowledgeBase" :model="model" @updated="state=$event;draftText=JSON.stringify($event.draft,null,2);refreshPreview()" @back="workspaceMode='graph'" @proceed="workspaceMode='workflow';step=5;loadVersions()" @open-evidence="emit('openEvidence',$event)" />
+    <OntologyGovernancePanel v-if="workspaceMode === 'quality'" :knowledge-base="knowledgeBase" :model="model" @updated="state=$event;draftText=JSON.stringify($event.draft,null,2);refreshPreview()" @back="workspaceMode='graph'" @proceed="workspaceMode='workflow';step=3;publicationOpen=true;buildProgress=3;refreshPreview();loadVersions()" @open-evidence="emit('openEvidence',$event)" />
 
     <section v-if="workspaceMode === 'graph'" class="grid gap-3">
       <div
         class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-5 py-3"
       >
-        <div class="flex items-center gap-2 text-xs">
-          <strong>查看范围</strong
-          ><button
-            class="rounded-lg px-3 py-2"
+        <div class="grid w-full grid-cols-2 gap-2 text-xs sm:w-auto sm:min-w-80">
+          <button
+            class="rounded-xl border px-4 py-3 text-left transition active:scale-[0.99]"
             :class="
               graphSource === 'published'
-                ? 'bg-emerald-100 text-emerald-700'
-                : 'bg-[var(--surface-muted)] text-[var(--muted)]'
+                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-sm'
+                : 'border-[var(--border)] bg-[var(--surface-muted)]/45 text-[var(--muted)] hover:bg-[var(--surface-muted)]'
             "
+            :aria-pressed="graphSource === 'published'"
             @click="openGraph('published')"
           >
-            已发布图谱</button
-          ><button
-            class="rounded-lg px-3 py-2"
+            <span class="block font-semibold">已发布图谱</span>
+            <span class="mt-1 block text-[10px] opacity-80">{{ publishedGraphCounts.nodes }} 个实体 · {{ publishedGraphCounts.edges }} 条关系</span>
+          </button>
+          <button
+            class="rounded-xl border px-4 py-3 text-left transition active:scale-[0.99]"
             :class="
               graphSource === 'draft'
-                ? 'bg-indigo-100 text-indigo-700'
-                : 'bg-[var(--surface-muted)] text-[var(--muted)]'
+                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] shadow-sm'
+                : 'border-[var(--border)] bg-[var(--surface-muted)]/45 text-[var(--muted)] hover:bg-[var(--surface-muted)]'
             "
+            :aria-pressed="graphSource === 'draft'"
             @click="openGraph('draft')"
           >
-            当前草稿
+            <span class="block font-semibold">当前草稿</span>
+            <span class="mt-1 block text-[10px] opacity-80">{{ draftGraphCounts.nodes }} 个实体 · {{ draftGraphCounts.edges }} 条关系</span>
           </button>
         </div>
         <div class="flex flex-wrap gap-2">
@@ -976,43 +1202,43 @@ onUnmounted(() => {
 
     <nav
       v-show="workspaceMode === 'workflow'"
-      class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3"
+      class="ontology-build-navigation"
       aria-label="本体构建步骤"
     >
+      <div class="ontology-build-caption"><strong>构建流程</strong><span>可返回查看，进度自动保存</span></div>
       <ol class="flex min-w-0 overflow-x-auto">
         <li
           v-for="item in [
-            { n: 1, t: '选择文档' },
-            { n: 2, t: 'AI 识别' },
-            { n: 3, t: '确认结果' },
-            { n: 4, t: '质量检查（可跳过）' },
-            { n: 5, t: '发布与验证' },
+            { n: 1, t: '选择资料' },
+            { n: 2, t: '分析与审核' },
+            { n: 3, t: '检查与发布' },
+            { n: 4, t: '召回验证' },
           ]"
           :key="item.n"
-          class="min-w-36 flex-1"
+          class="min-w-40 flex-1"
           :class="item.n > 1 ? '-ml-2' : ''"
         >
           <button
-            class="w-full px-5 py-3 text-xs font-semibold transition disabled:cursor-not-allowed"
+            class="ontology-build-step w-full disabled:cursor-not-allowed"
             :disabled="!canOpenStep(item.n)"
             :title="canOpenStep(item.n) ? undefined : '请先完成前一步'"
+            :aria-current="progressState(item.n) === 'current' ? 'step' : undefined"
             :style="progressShape(item.n)"
             :class="
               progressState(item.n) === 'current'
-                ? 'bg-[var(--accent)] text-white'
+                ? 'is-current'
                 : progressState(item.n) === 'completed'
-                  ? 'bg-emerald-100 text-emerald-800'
+                  ? 'is-completed'
                   : progressState(item.n) === 'skipped'
-                    ? 'bg-slate-200 text-slate-600'
-                  : 'bg-[var(--surface-muted)] text-[var(--muted)] opacity-75'
+                    ? 'is-skipped'
+                  : 'is-upcoming'
             "
-            @click="openStep(item.n as 1 | 2 | 3 | 4 | 5)"
+            @click="openStep(item.n as BuildStep)"
           >
-            <span v-if="progressState(item.n) === 'completed'" class="mr-1">✓</span><span v-else-if="progressState(item.n) === 'skipped'" class="mr-1">已跳过</span>{{ item.t }}
+            <span class="ontology-step-number" aria-hidden="true">{{ progressState(item.n) === 'completed' ? '✓' : item.n }}</span>{{ item.t }}<span v-if="progressState(item.n) === 'skipped'" class="ml-1 text-[10px]">已跳过</span>
           </button>
         </li>
       </ol>
-      <p class="mt-2 px-1 text-[11px] text-[var(--muted)]">蓝色表示当前进展，绿色表示已经完成。你可以返回查看之前的内容，不会改变实际进度。</p>
     </nav>
     <section
       v-if="workspaceMode === 'workflow' && step === 1"
@@ -1211,20 +1437,28 @@ onUnmounted(() => {
           </article>
         </div>
       </div>
-      <div
+      <button
         v-if="analysisBusy"
-        class="mx-5 mb-5 flex gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-blue-800"
+        type="button"
+        aria-label="查看 AI 本体识别实时进度"
+        class="group mx-5 mb-5 flex w-[calc(100%_-_2.5rem)] items-center gap-3 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 via-indigo-50 to-blue-50 p-4 text-left text-blue-800 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+        @click="openRunningAnalysis"
       >
         <span
-          class="mt-0.5 h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent"
+          class="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-current border-r-transparent"
         />
-        <div>
+        <div class="min-w-0 flex-1">
           <p class="text-sm font-semibold">正在生成本体候选</p>
           <p class="mt-1 text-xs">
-            正在读取切片、调用模型并核验证据引用，请保持页面开启。
+            任务仍在后台运行，点击返回实时批次分析界面。
           </p>
         </div>
-      </div>
+        <span
+          class="shrink-0 rounded-lg border border-blue-200 bg-white/80 px-3 py-2 text-xs font-semibold text-blue-700 transition group-hover:border-blue-300 group-hover:bg-white"
+        >
+          查看实时进度 →
+        </span>
+      </button>
       <div
         v-else-if="analysisResult"
         class="mx-5 mb-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800"
@@ -1240,24 +1474,28 @@ onUnmounted(() => {
     </section>
 
     <section
-      v-if="workspaceMode === 'workflow' && step === 2"
+      v-if="workspaceMode === 'workflow' && step === 2 && !reviewManagerOpen"
       class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]"
     >
       <div
-        class="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--border)] bg-gradient-to-r from-indigo-50 via-[var(--surface)] to-[var(--surface)] px-6 py-5"
+        class="ontology-analysis-heading"
       >
-        <div class="flex gap-3">
+        <div class="flex min-w-0 items-start gap-3">
           <span
             :class="[
-              'grid h-11 w-11 place-items-center rounded-2xl text-lg',
+              'grid h-10 w-10 shrink-0 place-items-center rounded-xl text-base font-semibold',
               analysisJob?.status === 'completed'
                 ? 'bg-emerald-100 text-emerald-700'
-                : 'bg-indigo-100 text-indigo-700',
+                : analysisJob?.status === 'partial'
+                  ? 'bg-amber-100 text-amber-700'
+                : 'bg-[var(--accent-soft)] text-[var(--accent)]',
             ]"
-            >{{ analysisJob?.status === "completed" ? "✓" : "AI" }}</span
+            >{{ analysisJob?.status === "completed" ? "✓" : analysisJob?.status === "partial" ? "!" : "AI" }}</span
           >
           <div>
-            <h3 class="font-semibold">AI 本体识别</h3>
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 class="font-semibold">AI 本体识别</h3>
+            </div>
             <p class="mt-1 text-xs text-[var(--muted)]">
               后台任务可持续运行，离开当前页面不会中断分析。
             </p>
@@ -1265,15 +1503,24 @@ onUnmounted(() => {
         </div>
         <span
           :class="[
-            'rounded-full px-3 py-1.5 text-xs font-semibold',
+            'shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold',
             analysisJob?.status === 'completed'
               ? 'bg-emerald-100 text-emerald-700'
+              : analysisJob?.status === 'partial'
+                ? 'bg-amber-100 text-amber-800'
               : analysisJob?.status === 'failed'
                 ? 'bg-rose-100 text-rose-700'
                 : 'bg-blue-100 text-blue-700',
           ]"
           >{{ analysisStatusLabel }}</span
         >
+        <div v-if="analysisJob" class="ontology-analysis-metrics">
+          <span class="ontology-analysis-metric">已完成 <strong>{{ analysisJob.completedChunkIds?.length || 0 }}</strong> 切片</span>
+          <span class="ontology-analysis-metric is-emphasized">候选 <strong>{{ analysisJob.discovered || analysisJob.result?.generated || 0 }}</strong></span>
+          <span class="ontology-analysis-metric">模型 <strong>{{ model?.chatModel || '应用模型' }}</strong></span>
+          <span class="ontology-analysis-metric">耗时 <strong>{{ Math.round(((analysisJob.completedAt || Date.now()) - analysisJob.startedAt) / 1000) }}</strong> 秒</span>
+          <span v-if="analysisJob.failedBatches" class="ontology-analysis-metric is-warning">待继续 <strong>{{ analysisJob.failedBatches }}</strong> 批</span>
+        </div>
       </div>
       <div class="p-6">
         <div
@@ -1303,17 +1550,55 @@ onUnmounted(() => {
             {{
               analysisJob?.status === "completed"
                 ? "所有批次和证据已经处理完成"
+                : analysisJob?.status === "partial"
+                  ? "已完成结果已保存，可继续剩余内容或先审核"
                 : `当前：${analysisJob?.phase || "准备任务"}`
             }}
           </p>
         </div>
-        <div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-100">
+        <div class="analysis-progress-track relative mt-3 h-3 overflow-hidden rounded-full bg-slate-100" :class="{ 'is-running': analysisBusy }">
           <div
-            class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-blue-500 transition-all duration-500"
+            class="analysis-progress-fill h-full rounded-full transition-all duration-500"
             :style="{ width: `${analysisPercent}%` }"
           />
         </div>
-        <div class="mt-6 grid gap-2 md:grid-cols-5">
+        <div v-if="analysisJob?.activeBatches?.length" class="mt-4 grid gap-2 md:grid-cols-2">
+          <article
+            v-for="batch in analysisJob.activeBatches"
+            :key="batch.slot"
+            :class="[
+              'batch-lane overflow-hidden rounded-xl border bg-[var(--surface)]',
+              batch.state === 'running' ? 'border-blue-200 shadow-[0_8px_24px_rgba(37,99,235,.08)]' : batch.state === 'completed' ? 'border-emerald-200' : 'border-amber-200',
+            ]"
+          >
+            <div class="flex items-start justify-between gap-3 px-3.5 py-3">
+              <div class="flex min-w-0 items-start gap-2.5">
+                <span :class="['grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[10px] font-bold', batch.state === 'running' ? 'bg-blue-600 text-white' : batch.state === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800']">{{ batch.slot }}</span>
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <strong class="text-xs">处理通道 {{ batch.slot }}</strong>
+                    <span class="rounded bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--muted)]">第 {{ batch.batchNumber }} 批</span>
+                    <span class="text-[9px] text-[var(--muted)]">{{ batch.chunkCount }} 个切片</span>
+                  </div>
+                  <p class="mt-1 truncate text-[10px] text-[var(--muted)]">{{ batch.documentTitles.join('、') }}</p>
+                </div>
+              </div>
+              <span :class="['shrink-0 text-[10px] font-semibold', batch.state === 'running' ? 'text-blue-700' : batch.state === 'completed' ? 'text-emerald-700' : 'text-amber-800']">{{ batch.phase }}</span>
+            </div>
+            <div class="mx-3.5 mb-3 h-1.5 overflow-hidden rounded-full bg-slate-100">
+              <div :class="['batch-lane-fill h-full rounded-full', `is-${batch.state}`]" />
+            </div>
+            <div class="flex items-center justify-between border-t border-[var(--border)]/70 px-3.5 py-2 text-[9px] text-[var(--muted)]">
+              <span>{{ batch.state === 'running' ? '正在抽取实体、关系与原文证据' : batch.state === 'completed' ? `已保存 ${batch.candidates || 0} 个候选` : (batch.failure?.message || '可稍后单独继续，不影响其他结果') }}</span>
+              <span>{{ Math.max(0, Math.round(((batch.completedAt || Date.now()) - batch.startedAt) / 1000)) }} 秒</span>
+            </div>
+            <div v-if="batch.state === 'running'" class="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] px-3.5 py-2.5">
+              <span class="text-[10px] text-[var(--muted)]">跳过后继续下一批，此内容可稍后补充</span>
+              <button type="button" class="rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40" :disabled="skippingBatches.has(batch.batchNumber) || stoppingForReview || analysisJob?.stopRequested" @click="skipAnalysisBatch(batch.batchNumber)">{{ skippingBatches.has(batch.batchNumber) ? '正在中止…' : batch.chunkCount === 1 ? '跳过此切片' : `跳过本批 ${batch.chunkCount} 个切片` }}</button>
+            </div>
+          </article>
+        </div>
+        <div class="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-5">
           <div
             v-for="(label, index) in [
               '读取文档',
@@ -1324,7 +1609,7 @@ onUnmounted(() => {
             ]"
             :key="label"
             :class="[
-              'relative rounded-xl border p-3',
+              'relative rounded-lg border px-2.5 py-2',
               phaseState(label) === '已完成'
                 ? 'border-emerald-200 bg-emerald-50'
                 : phaseState(label) === '等待中'
@@ -1332,10 +1617,10 @@ onUnmounted(() => {
                   : 'border-blue-300 bg-blue-50',
             ]"
           >
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-1.5">
               <span
                 :class="[
-                  'grid h-6 w-6 place-items-center rounded-full text-[10px] font-bold',
+                  'grid h-4 w-4 place-items-center rounded-full text-[8px] font-bold',
                   phaseState(label) === '已完成'
                     ? 'bg-emerald-600 text-white'
                     : phaseState(label) === '等待中'
@@ -1343,55 +1628,39 @@ onUnmounted(() => {
                       : 'bg-blue-600 text-white',
                 ]"
                 >{{ phaseState(label) === "已完成" ? "✓" : index + 1 }}</span
-              ><strong class="text-xs">{{ label }}</strong>
+              ><strong class="truncate text-[10px]">{{ label }}</strong>
             </div>
-            <p class="mt-2 pl-8 text-[10px] text-[var(--muted)]">
+            <p class="mt-1 pl-5 text-[9px] text-[var(--muted)]">
               {{ phaseState(label) }}
             </p>
           </div>
         </div>
-        <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div
-            class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/25 p-4"
-          >
-            <span class="text-[11px] text-[var(--muted)]">处理耗时</span
-            ><strong class="mt-1 block text-lg"
-              >{{
-                analysisJob
-                  ? Math.round(
-                      ((analysisJob.completedAt || Date.now()) -
-                        analysisJob.startedAt) /
-                        1000,
-                    )
-                  : 0
-              }}
-              秒</strong
+        <div
+          v-if="analysisJob?.status === 'partial'"
+          class="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 p-4"
+        >
+          <div class="max-w-2xl">
+            <strong class="text-sm text-amber-900">{{ analysisJob.stopRequested ? '分析已停止，已有结果已保存' : (analysisJob.result?.analyzedChunks || 0) > 0 ? "部分内容已完成" : "本次尚无完成的切片" }}</strong>
+            <p class="mt-1 text-xs leading-5 text-amber-800">
+              共 {{ (analysisJob.result?.analyzedChunks || 0) + (analysisJob.result?.failedChunkIds.length || 0) }} 个切片；已完成 {{ analysisJob.result?.analyzedChunks || 0 }} 个，另有 {{ analysisJob.result?.failedChunkIds.length || 0 }} 个尚未分析。原因：{{ analysisFailureSummary }}。文档、索引和批次检查点均已保存，继续处理时只会提交未完成切片。
+            </p>
+          </div>
+          <div class="flex shrink-0 flex-wrap gap-2">
+            <button
+              v-if="(analysisJob.result?.generated || 0) > 0"
+              type="button"
+              class="rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 active:scale-[0.98]"
+              @click="reviewAvailableCandidates"
             >
-          </div>
-          <div
-            class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/25 p-4"
-          >
-            <span class="text-[11px] text-[var(--muted)]">抽取模型</span
-            ><strong class="mt-1 block truncate text-sm">{{
-              model?.chatModel
-            }}</strong>
-          </div>
-          <div
-            class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/25 p-4"
-          >
-            <span class="text-[11px] text-[var(--muted)]">分析批次</span
-            ><strong class="mt-1 block text-lg"
-              >{{ analysisJob?.currentBatch || 0 }} /
-              {{ analysisJob?.totalBatches || 0 }}</strong
+              先审核本次新增的 {{ analysisJob.result?.generated || 0 }} 条
+            </button>
+            <button
+              type="button"
+              class="rounded-lg bg-amber-700 px-4 py-2 text-sm font-semibold text-white active:scale-[0.98]"
+              @click="retryRemainingAnalysis"
             >
-          </div>
-          <div
-            class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/25 p-4"
-          >
-            <span class="text-[11px] text-[var(--muted)]">发现候选</span
-            ><strong class="mt-1 block text-lg">{{
-              analysisJob?.discovered || analysisJob?.result?.generated || 0
-            }}</strong>
+              继续未完成的 {{ analysisJob.result?.failedChunkIds.length || 0 }} 个切片
+            </button>
           </div>
         </div>
         <div
@@ -1411,37 +1680,107 @@ onUnmounted(() => {
           </div>
           <button
             class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white"
-            @click="step = 3"
+            @click="reviewAvailableCandidates"
           >
-            查看并整理候选
+            审核本次新增的 {{ analysisJob.result?.generated || 0 }} 条
           </button>
         </div>
         <div
-          v-if="analysisJob?.status !== 'completed'"
-          class="mt-5 flex justify-end gap-2"
+          v-if="analysisJob?.status !== 'completed' && analysisJob?.status !== 'partial'"
+          class="mt-5 flex flex-wrap justify-end gap-2"
         >
+          <button
+            v-if="analysisBusy && (analysisJob?.discovered || 0) > 0"
+            class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.98]"
+            @click="reviewAvailableCandidates"
+          >
+            先审核已生成候选
+          </button>
           <button v-if="analysisBusy" class="rounded-lg border px-4 py-2 text-sm" @click="step = 1">
             后台运行</button
           ><button
             v-if="analysisBusy"
             class="rounded-lg border border-rose-300 px-4 py-2 text-sm text-rose-600"
-            @click="cancelAnalysis"
+            :disabled="stoppingForReview || analysisJob?.stopRequested"
+            @click="stopAnalysisAndCheck"
           >
-            取消任务
+            {{ stoppingForReview || analysisJob?.stopRequested ? '正在停止并保存结果…' : '停止分析，检查已有结果' }}
           </button>
         </div>
+        <p v-if="analysisBusy" class="mt-3 text-right text-xs text-[var(--muted)]">停止后保留已完成结果；已跳过和未处理的切片可以稍后继续。</p>
+        <p v-if="analysisControlError" role="alert" class="mt-3 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{{ analysisControlError }}</p>
       </div>
     </section>
 
+    <dialog ref="reviewDialog" class="ontology-review-dialog" aria-label="审核已生成候选" @cancel="reviewSaveError = ''">
+      <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[var(--border)] bg-[var(--surface)] p-4">
+        <div><h3 class="font-semibold">审核已生成候选</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ analysisBusy ? '后台继续分析，关闭弹窗即可返回实时进度。' : '分析结果已保存，关闭弹窗返回任务详情。' }} 接受后加入草稿，不会自动发布。</p></div>
+        <button class="rounded-lg border px-4 py-2 text-sm" @click="reviewDialog?.close()">{{ step === 3 ? '返回检查' : '返回分析' }}</button>
+      </div>
+      <div class="p-4 text-sm">本次打开固定审核 {{ scopedCandidates.length }} 条候选；{{ analysisBusy ? '新生成的候选下次打开时显示。' : '接受并加入草稿后，即可检查和发布。' }}</div>
+      <label class="mx-4 mb-4 block text-xs">审核范围
+        <select v-model="reviewChunkId" :disabled="reviewSaving" class="ml-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2 disabled:opacity-40" @change="modalCandidate = null">
+          <option value="">本次已生成的全部候选</option>
+          <option v-for="(id, index) in reviewChunks" :key="id" :value="id">已完成片段 {{ index + 1 }} · {{ scopedCandidates.filter(item => item.evidence.some(evidence => evidence.chunkId === id)).length }} 条候选</option>
+        </select>
+      </label>
+      <OntologyGraphView v-if="candidateGraph.nodes.length" :graph="candidateGraph" title="候选与草稿上下文" compact @open-evidence="emit('openEvidence', $event)" />
+      <div class="grid gap-3 p-4 md:grid-cols-2">
+        <article v-for="item in modalReviewCandidates" :key="item.id" class="rounded-xl border border-[var(--border)] p-4">
+          <h4 class="font-semibold">{{ candidateTitle(item) }}</h4>
+          <button v-if="item.status === 'pending' || item.status === 'accepted' || item.status === 'deferred'" :disabled="reviewSaving" class="mt-2 rounded-lg border px-3 py-1 text-xs disabled:opacity-40" @click="modalCandidate = JSON.parse(JSON.stringify(item))">编辑内容</button>
+          <p class="mt-1 text-xs text-[var(--muted)]">{{ candidateMeta(item) }}</p>
+          <blockquote class="my-3 border-l-2 border-[var(--accent)] pl-3 text-xs">{{ item.evidence[0]?.quote }}</blockquote>
+          <div v-if="item.status === 'pending' || item.status === 'deferred'" class="flex justify-end gap-2">
+            <button :disabled="reviewSaving" class="rounded-lg border px-3 py-2 text-xs disabled:opacity-40" @click="review(item.id, 'rejected')">不采用</button>
+            <button :disabled="reviewSaving" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs text-white disabled:opacity-40" @click="review(item.id, 'accepted')">接受</button>
+          </div>
+          <p v-else class="text-xs text-[var(--muted)]">{{ item.status === 'accepted' ? '已接受，待加入草稿' : item.status === 'staged' ? '已加入草稿' : item.status === 'rejected' ? '已拒绝' : '已处理' }}</p>
+        </article>
+        <p v-if="!scopedCandidates.length" class="text-sm text-[var(--muted)]">暂无可审核候选。旧任务如未记录候选归属，请在候选管理中明确选择，系统不会自动混入历史结果。</p>
+      </div>
+      <div class="sticky bottom-0 border-t border-[var(--border)] bg-[var(--surface)] p-4">
+        <div v-if="modalCandidate" class="mb-4 rounded-xl border border-[var(--border)] p-3">
+          <label v-if="modalCandidate.node" class="block text-xs">实体名称<input v-model="modalCandidate.node.name" class="mt-1 w-full rounded-lg border bg-[var(--surface)] p-2" /></label>
+          <template v-if="modalCandidate.edge">
+            <label class="block text-xs">起点实体<select v-model="modalCandidate.edge.subjectId" class="m-1 rounded-lg border bg-[var(--surface)] p-2"><option v-for="node in candidateGraph.nodes" :key="String(node.id)" :value="String(node.id)">{{ node.name }}</option></select></label>
+            <label class="block text-xs">关系名称<input v-model="modalCandidate.edge.predicate" class="m-1 rounded-lg border bg-[var(--surface)] p-2" /></label>
+            <label class="block text-xs">终点实体<select v-model="modalCandidate.edge.objectId" class="m-1 rounded-lg border bg-[var(--surface)] p-2"><option v-for="node in candidateGraph.nodes" :key="String(node.id)" :value="String(node.id)">{{ node.name }}</option></select></label>
+          </template>
+          <div class="mt-2 flex justify-end gap-2"><button class="rounded-lg border px-3 py-2 text-xs" @click="modalCandidate = null">取消编辑</button><button :disabled="reviewSaving" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs text-white" @click="saveModalCandidate">保存修改</button></div>
+        </div>
+        <p v-if="reviewSaveError" role="alert" class="mb-3 text-sm text-rose-600">{{ reviewSaveError }}</p>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="text-xs text-[var(--muted)]" aria-live="polite">
+            <p>待审核 {{ modalReviewCandidates.filter(item => item.status === 'pending').length }} · 已接受 {{ modalReviewCandidates.filter(item => item.status === 'accepted').length }} · 已拒绝 {{ modalReviewCandidates.filter(item => item.status === 'rejected').length }}</p>
+            <p class="mt-1 text-[11px]">{{ modalCandidate ? '请先保存或取消当前编辑，再批量操作。' : '仅操作当前范围内尚未入草稿的候选。' }}</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" :disabled="reviewSaving || !!modalCandidate || !modalAcceptIds.length" class="rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2.5 text-xs font-semibold text-[var(--accent)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40" @click="reviewAllInModal('accepted')">{{ modalBulkDecision === 'accepted' ? '正在全部接受…' : `全部接受（${modalAcceptIds.length}）` }}</button>
+            <button type="button" :disabled="reviewSaving || !!modalCandidate || !modalRejectIds.length" class="rounded-lg border border-rose-200 px-3 py-2.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40" @click="reviewAllInModal('rejected')">{{ modalBulkDecision === 'rejected' ? '正在全部拒绝…' : `全部拒绝（${modalRejectIds.length}）` }}</button>
+            <button :disabled="reviewSaving || !!modalCandidate || !modalReviewCandidates.some(item => item.status === 'accepted')" class="rounded-xl bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white disabled:opacity-40" @click="saveReviewedToDraft">{{ reviewSaving && !modalBulkDecision ? '正在保存…' : step === 3 ? '加入草稿并返回检查' : '加入草稿并返回分析' }}</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <div v-if="workspaceMode === 'workflow' && step === 2" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+      <div class="text-xs text-[var(--muted)]">{{ analysisBusy ? '后台继续分析；已审核结果可先加入草稿，后续结果另行处理。' : '候选经审核加入草稿后，即可检查并发布。' }}</div>
+      <div class="flex flex-wrap gap-2">
+        <button v-if="analysisJob" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="reviewManagerOpen ? reviewManagerOpen=false : showAllCandidates()">{{ reviewManagerOpen ? '返回实时分析' : '管理全部候选' }}</button>
+        <button :disabled="!canOpenStep(3)" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-40" @click="openStep(3)">检查并发布草稿</button>
+      </div>
+    </div>
+
     <section
-      v-if="workspaceMode === 'workflow' && step === 3"
+      v-if="workspaceMode === 'workflow' && step === 2 && reviewManagerOpen"
       class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5"
     >
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 class="font-semibold">候选审核</h3>
           <p class="mt-1 text-xs text-[var(--muted)]">
-            核对识别结果和原文证据，批准后再统一写入正式图谱。
+            核对识别结果和原文证据，接受后加入草稿，再单独检查和发布。
           </p>
         </div>
         <div class="flex gap-2 text-xs">
@@ -1455,9 +1794,23 @@ onUnmounted(() => {
           >
         </div>
       </div>
+      <div
+        v-if="candidateScopeIds"
+        class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-blue-900"
+      >
+        <div>
+          <strong class="text-sm">当前仅审核本次新增的 {{ scopedCandidates.length }} 条候选</strong>
+          <p class="mt-1 text-xs text-blue-700">
+            其余 {{ historicalCandidateCount }} 条历史候选未包含在本次批量操作中；仍有 {{ analysisJob?.result?.failedChunkIds.length || 0 }} 个切片尚未完成，稍后可以继续分析。
+          </p>
+        </div>
+        <button class="rounded-lg border border-blue-300 bg-white px-3 py-2 text-xs font-semibold text-blue-800" @click="showAllCandidates">
+          查看全部历史候选
+        </button>
+      </div>
       <div v-if="candidateGraph.nodes.length" class="mb-4">
         <OntologyGraphView :graph="candidateGraph" title="AI 识别候选关系图" compact editable @edit="editGraphItem" @open-evidence="emit('openEvidence', $event)" />
-        <p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">图中同时显示现有草稿与本次 AI 候选。点击节点或连线即可查看和编辑，下方只需确认是否采用。</p>
+        <p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">图中显示现有草稿与{{ candidateScopeIds ? '本次新增候选' : '全部候选' }}。点击节点或连线即可查看和编辑，下方只需确认是否采用。</p>
       </div>
       <div
         v-if="pending.length"
@@ -1551,7 +1904,7 @@ onUnmounted(() => {
           </div>
         </article>
       </div>
-      <div v-if="step === 3" class="mt-4 flex items-center justify-between">
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-2">
         <button class="rounded-lg border px-3 py-2 text-xs" @click="addEntity">
           ＋ 新增实体</button
         ><button
@@ -1565,33 +1918,59 @@ onUnmounted(() => {
           class="rounded-xl bg-[var(--accent)] px-5 py-3 text-sm text-white"
           @click="proceedToReview"
         >
-          保存草稿并进入图谱审核
+          保存已接受项，检查草稿
         </button>
       </div>
     </section>
 
-    <template v-if="workspaceMode === 'workflow' && step === 4">
+    <div v-if="workspaceMode === 'workflow' && step === 3" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div><h3 class="text-sm font-semibold">检查与发布</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ analysisBusy ? '分析仍在后台运行，本次仅发布当前草稿，后续候选留待下次处理。' : '先处理草稿中的问题，确认发布后再验证召回效果。' }}</p></div>
+        <div class="flex gap-2 text-xs font-semibold">
+          <button class="rounded-lg border px-3 py-2" :class="!publicationOpen ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--border)]'" @click="publicationOpen=false;qualitySkipped=false">质量检查</button>
+          <button class="rounded-lg border px-3 py-2 disabled:opacity-40" :class="publicationOpen ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--border)]'" :disabled="!hasDraftContent || !preview || preview.validation.blockers.length > 0" @click="publicationOpen=true;loadVersions()">发布确认</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="workspaceMode === 'workflow' && step === 3 && hasDraftContent && unstagedTaskCandidates.length" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-blue-900">
+      <div><strong class="text-sm">本次还有 {{ unstagedTaskCandidates.length }} 条候选尚未加入草稿</strong><p class="mt-1 text-xs">可以先审核并加入草稿；若直接发布，当前版本只包含已入草稿的内容。</p></div>
+      <button class="rounded-lg border border-blue-300 bg-white px-3 py-2 text-xs font-semibold" @click="reviewAvailableCandidates">审核已有候选</button>
+    </div>
+
+    <section v-if="workspaceMode === 'workflow' && step === 3 && !hasDraftContent" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+      <h3 class="font-semibold">{{ (state?.candidates.length || 0) > 0 ? '先把审核结果加入草稿' : '暂时没有可检查的草稿' }}</h3>
+      <p class="mt-2 text-sm leading-6 text-[var(--muted)]">{{ (state?.candidates.length || 0) > 0 ? '分析已停止，已生成候选和完成记录均已保存。请先审核并将接受的内容加入草稿，再检查与发布。' : '已完成内容和未处理范围均已保留。你可以返回继续分析、调整资料，或手动创建实体关系。' }}</p>
+      <div class="mt-4 flex flex-wrap gap-2"><button v-if="(analysisJob?.candidateIds?.length || analysisJob?.result?.candidateIds?.length || 0) > 0" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" @click="reviewAvailableCandidates">审核已生成候选</button><button class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm" @click="step=2;showAllCandidates()">管理候选 / 手动补充</button><button class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm" @click="step=2;reviewManagerOpen=false">返回分析</button></div>
+    </section>
+
+    <template v-if="workspaceMode === 'workflow' && step === 3 && !publicationOpen && hasDraftContent">
+      <div v-if="preview?.validation.blockers.length" class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
+        <strong class="text-sm">当前草稿有 {{ preview.validation.blockers.length }} 个阻断问题</strong>
+        <ul class="mt-2 list-inside list-disc space-y-1 text-xs"><li v-for="message in preview.validation.blockers" :key="message">{{ message }}</li></ul>
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="text-xs">图谱结构问题可在下方处理；涉及属性、实体类型和关系规则的问题，可查看业务知识规则。</p><button class="rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-semibold" @click="workspaceMode='model'">查看业务知识规则</button></div>
+      </div>
       <div v-if="canSkipQuality" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-800">
-        <div><strong class="text-sm">当前没有阻断问题</strong><p class="mt-1 text-xs">质量检查是可选步骤。你可以继续检查，也可以直接进入发布与召回验证。</p></div>
-        <button class="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-semibold text-white" @click="skipQualityCheck">跳过，继续发布</button>
+        <div><strong class="text-sm">当前草稿检查通过</strong><p class="mt-1 text-xs">可以继续查看检查详情，也可以直接确认发布。</p></div>
+        <button class="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-semibold text-white" @click="skipQualityCheck">跳过详细检查，确认发布</button>
       </div>
       <OntologyGovernancePanel
         :knowledge-base="knowledgeBase"
         :model="model"
         @updated="state = $event;draftText = JSON.stringify($event.draft,null,2);refreshPreview()"
-        @back="step = 3"
+        @back="step = 2;reviewManagerOpen = !analysisJob"
         @open-evidence="emit('openEvidence', $event)"
-        @proceed="step = 5;loadVersions()"
+        @proceed="publicationOpen = true;buildProgress = 3;refreshPreview();loadVersions()"
       />
     </template>
 
     <section
-      v-if="workspaceMode === 'workflow' && step === 5"
+      v-if="workspaceMode === 'workflow' && step === 3 && publicationOpen && hasDraftContent"
       class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5"
     >
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 class="font-semibold">发布正式版本</h3>
+          <h3 class="font-semibold">确认发布当前草稿</h3>
           <p class="mt-1 text-xs text-[var(--muted)]">
             发布会影响数字员工的默认知识检索，仅管理员可以执行；发布人由当前登录身份自动记录。
           </p>
@@ -1609,8 +1988,9 @@ onUnmounted(() => {
       <div v-if="preview" class="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-4">
         <div class="flex flex-wrap items-center justify-between gap-2"><strong class="text-sm">本次发布变更</strong><span :class="['rounded-full px-2.5 py-1 text-[11px] font-semibold', preview.validation.blockers.length ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700']">{{ preview.validation.blockers.length ? `${preview.validation.blockers.length} 个阻断问题` : '校验通过' }}</span></div>
         <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6"><div class="rounded-lg bg-emerald-50 p-2 text-emerald-700"><strong class="block text-lg">{{ preview.summary.addedNodes }}</strong>新增实体</div><div class="rounded-lg bg-blue-50 p-2 text-blue-700"><strong class="block text-lg">{{ preview.summary.modifiedNodes }}</strong>修改实体</div><div class="rounded-lg bg-rose-50 p-2 text-rose-700"><strong class="block text-lg">{{ preview.summary.deletedNodes }}</strong>删除实体</div><div class="rounded-lg bg-emerald-50 p-2 text-emerald-700"><strong class="block text-lg">{{ preview.summary.addedEdges }}</strong>新增关系</div><div class="rounded-lg bg-blue-50 p-2 text-blue-700"><strong class="block text-lg">{{ preview.summary.modifiedEdges }}</strong>修改关系</div><div class="rounded-lg bg-rose-50 p-2 text-rose-700"><strong class="block text-lg">{{ preview.summary.deletedEdges }}</strong>删除关系</div></div>
-        <div v-if="preview.validation.blockers.length" class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-rose-50 p-3 text-xs text-rose-700"><span>质量检查尚未完成，请先处理阻断问题。</span><button class="rounded-lg border border-rose-300 bg-white px-3 py-1.5 font-semibold" @click="step=4">返回质量检查</button></div>
+        <div v-if="preview.validation.blockers.length" class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-rose-50 p-3 text-xs text-rose-700"><span>当前草稿仍有阻断问题，请返回质量检查处理。</span><button class="rounded-lg border border-rose-300 bg-white px-3 py-1.5 font-semibold" @click="publicationOpen=false">返回质量检查</button></div>
       </div>
+      <p v-if="qualitySkipped" class="mt-3 text-xs text-[var(--muted)]">已跳过检查详情；发布时仍会自动校验当前草稿。</p>
       <label class="mt-4 block text-xs font-semibold"
         >版本说明<textarea
           v-model="publishNote"
@@ -1618,6 +1998,11 @@ onUnmounted(() => {
           placeholder="说明本次本体变更、影响范围和验证结果"
         />
       </label>
+      <div class="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-blue-900">
+        <strong class="text-sm">本次仅发布当前草稿：{{ state?.draft.nodes.length || 0 }} 个实体、{{ state?.draft.edges.length || 0 }} 条关系</strong>
+        <p class="mt-1 text-xs leading-5">已接受但未加入草稿的候选不包含在本次版本中。{{ analysisBusy ? '分析仍在后台进行，后续候选需要另行审核、入草稿并发布。' : analysisJob ? `最近任务已完成 ${analysisJob.completedChunkIds?.length || analysisJob.result?.analyzedChunks || 0} 个切片，${analysisJob.failedChunkIds?.length || analysisJob.result?.failedChunkIds.length || 0} 个待继续；未完成内容可稍后补充。` : '发布后，数字员工将使用这一正式版本进行本体增强召回。' }}</p>
+      </div>
+      <p v-if="publicationError" role="alert" class="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{{ publicationError }}</p>
       <div class="mt-4 flex items-center justify-between gap-3">
         <p class="text-xs text-[var(--muted)]">
           {{
@@ -1628,10 +2013,10 @@ onUnmounted(() => {
         </p>
         <button
           class="rounded-xl bg-[var(--accent)] px-5 py-3 text-sm text-white disabled:cursor-not-allowed disabled:opacity-45"
-          :disabled="!isAdmin"
+          :disabled="!isAdmin || !preview || preview.validation.blockers.length > 0 || publicationBusy"
           @click="publishVersion"
         >
-          校验并发布版本
+          {{ publicationBusy ? '正在校验并发布…' : '校验并发布版本' }}
         </button>
       </div>
       <div class="mt-6 border-t pt-4">
@@ -1840,7 +2225,7 @@ onUnmounted(() => {
     </div>
 
     <section
-      v-if="workspaceMode === 'workflow' && step === 5 && state?.published"
+      v-if="workspaceMode === 'workflow' && step === 4 && state?.published"
       class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]"
     >
       <div
@@ -1853,12 +2238,12 @@ onUnmounted(() => {
                 class="grid h-8 w-8 place-items-center rounded-xl bg-emerald-600 text-sm font-bold text-white"
                 >⌕</span
               >
-              <h3 class="font-semibold">本体检索验证</h3>
+              <h3 class="font-semibold">召回验证</h3>
             </div>
             <p
               class="mt-2 max-w-3xl text-xs leading-relaxed text-[var(--muted)]"
             >
-              输入真实业务问题，检查正式本体是否命中实体、扩展一跳关系并增强知识片段召回。此操作只读，不会修改本体或知识库。
+              输入真实业务问题，查看命中的实体、关联路径和原文证据，检验已发布本体的召回效果。
             </p>
           </div>
           <span
@@ -1877,6 +2262,7 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="p-5">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800"><span>当前验证正式版本 v{{ state.published.version }}；后续新增草稿不会影响此版本。</span><button class="rounded-lg border border-emerald-300 bg-white px-3 py-2 font-semibold" @click="publicationOpen=true;openStep(3)">查看发布记录</button></div>
         <form
           class="flex flex-col gap-3 sm:flex-row"
           @submit.prevent="verifyRetrieval"
@@ -2156,7 +2542,7 @@ onUnmounted(() => {
     </section>
 
     <section
-      v-if="workspaceMode === 'workflow' && step === 3"
+      v-if="workspaceMode === 'workflow' && step === 2 && reviewManagerOpen"
       class="rounded-2xl border border-[var(--border)] bg-[var(--surface)]"
     >
       <button
@@ -2209,3 +2595,162 @@ onUnmounted(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.ontology-workbench { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.ontology-workbench > * { min-width: 0; }
+.ontology-workspace-header {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+}
+.ontology-workspace-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px 12px;
+}
+.ontology-workspace-heading h3 { font-size: 15px; font-weight: 700; letter-spacing: -.02em; }
+.ontology-workspace-heading > div { min-width: 0; }
+.ontology-workspace-heading p { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.ontology-rules-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  transition: background 160ms, border-color 160ms, color 160ms;
+}
+.ontology-rules-button:hover, .ontology-rules-button.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.ontology-mode-navigation { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 20px 16px; }
+.ontology-mode-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 74px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+  color: var(--text);
+  transition: background 180ms, border-color 180ms, box-shadow 180ms, transform 180ms;
+}
+.ontology-mode-button:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 10%, transparent); }
+.ontology-mode-button:active { transform: translateY(0); }
+.ontology-mode-button.is-active { border-color: var(--accent); background: var(--accent); color: var(--surface); box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 20%, transparent); }
+.ontology-mode-button:focus-visible, .ontology-rules-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.ontology-mode-icon { display: grid; width: 36px; height: 36px; flex-shrink: 0; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 21px; font-weight: 600; }
+.ontology-mode-icon-ai { font-size: 13px; letter-spacing: -.03em; }
+.ontology-mode-button.is-active .ontology-mode-icon { background: color-mix(in srgb, var(--surface) 16%, transparent); color: inherit; }
+.ontology-mode-copy { display: block; min-width: 0; flex: 1; }
+.ontology-mode-copy strong { display: block; font-size: 14px; font-weight: 700; }
+.ontology-mode-copy > span { display: block; margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--muted); }
+.ontology-mode-button.is-active .ontology-mode-copy > span { color: inherit; opacity: .85; }
+.ontology-mode-arrow { flex-shrink: 0; color: var(--muted); opacity: .6; transition: transform 180ms, opacity 180ms; }
+.ontology-mode-button.is-active .ontology-mode-arrow { color: inherit; opacity: 1; }
+.ontology-mode-button:hover .ontology-mode-arrow { transform: translateX(2px); opacity: 1; }
+.ontology-build-navigation { padding: 14px 16px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
+.ontology-build-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
+.ontology-build-caption strong { font-size: 12px; color: var(--text); }
+.ontology-build-step { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 8px 20px; font-size: 12px; font-weight: 600; transition: filter 160ms; }
+.ontology-build-step.is-current { background: var(--accent); color: var(--surface); }
+.ontology-build-step.is-completed { background: color-mix(in srgb, var(--accent) 11%, var(--surface)); color: var(--accent); }
+.ontology-build-step.is-upcoming, .ontology-build-step.is-skipped { background: var(--surface-muted); color: var(--muted); }
+.ontology-build-step:hover:not(:disabled) { filter: brightness(.96); }
+.ontology-step-number { display: inline-grid; width: 21px; height: 21px; flex-shrink: 0; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-size: 10px; }
+.ontology-build-step.is-current .ontology-step-number { border-color: transparent; background: color-mix(in srgb, var(--surface) 18%, transparent); }
+.ontology-analysis-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.ontology-analysis-heading > div:first-child { flex: 1; min-width: 180px; }
+.ontology-analysis-metrics { display: flex; flex-basis: 100%; flex-wrap: wrap; gap: 7px; padding-left: 52px; }
+.ontology-analysis-metric { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 7px; background: var(--surface-muted); font-size: 11px; line-height: 1.5; color: var(--muted); }
+.ontology-analysis-metric strong { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+.ontology-analysis-metric.is-emphasized { background: var(--accent-soft); color: var(--accent); }
+.ontology-analysis-metric.is-emphasized strong { color: inherit; }
+.ontology-analysis-metric.is-warning { background: #fffbeb; color: #92400e; }
+.ontology-analysis-metric.is-warning strong { color: inherit; }
+@media (max-width: 760px) {
+  .ontology-mode-navigation { gap: 8px; padding: 0 14px 14px; }
+  .ontology-mode-button { gap: 8px; padding: 12px; }
+  .ontology-mode-icon { width: 30px; height: 30px; }
+  .ontology-mode-arrow { display: none; }
+  .ontology-mode-copy strong { font-size: 13px; }
+}
+@media (max-width: 600px) {
+  .ontology-workspace-heading { align-items: flex-start; padding: 14px; gap: 10px; }
+  .ontology-workspace-heading p { max-width: 28ch; font-size: 11px; }
+  .ontology-rules-button { padding: 7px 9px; font-size: 11px; }
+  .ontology-mode-navigation { grid-template-columns: minmax(0, 1fr); }
+  .ontology-mode-button { min-height: 62px; }
+  .ontology-mode-arrow { display: block; }
+  .ontology-mode-copy strong { font-size: 14px; }
+  .ontology-analysis-heading { padding: 16px; }
+  .ontology-analysis-metrics { padding-left: 0; }
+  .ontology-build-caption > span { font-size: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ontology-mode-button, .ontology-mode-arrow, .ontology-rules-button { transition: none; }
+  .ontology-mode-button:hover, .ontology-mode-button:active, .ontology-mode-button:hover .ontology-mode-arrow { transform: none; }
+}
+.analysis-progress-fill {
+  position: relative;
+  background: linear-gradient(90deg, #4f46e5 0%, #2563eb 42%, #06b6d4 72%, #22c55e 100%);
+  background-size: 180% 100%;
+}
+.analysis-progress-fill::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(110deg, transparent 20%, rgb(255 255 255 / 55%) 42%, transparent 64%);
+  transform: translateX(-100%);
+}
+.analysis-progress-track.is-running .analysis-progress-fill {
+  animation: ontology-flow 2.4s linear infinite;
+}
+.analysis-progress-track.is-running .analysis-progress-fill::after {
+  animation: ontology-shine 1.6s ease-in-out infinite;
+}
+.batch-lane-fill.is-running {
+  width: 42%;
+  background: linear-gradient(90deg, #2563eb, #22d3ee, #6366f1);
+  box-shadow: 0 0 12px rgb(37 99 235 / 32%);
+  animation: batch-lane-scan 1.8s cubic-bezier(.4, 0, .2, 1) infinite alternate;
+}
+.batch-lane-fill.is-completed {
+  width: 100%;
+  background: linear-gradient(90deg, #10b981, #22c55e);
+}
+.batch-lane-fill.is-failed {
+  width: 100%;
+  background: repeating-linear-gradient(135deg, #f59e0b 0 7px, #fcd34d 7px 14px);
+}
+.batch-lane-fill.is-skipped { width: 100%; background: #cbd5e1; }
+@keyframes ontology-flow {
+  to { background-position: -180% 0; }
+}
+@keyframes ontology-shine {
+  60%, 100% { transform: translateX(130%); }
+}
+@keyframes batch-lane-scan {
+  from { transform: translateX(-8%); }
+  to { transform: translateX(138%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .analysis-progress-track.is-running .analysis-progress-fill,
+  .analysis-progress-track.is-running .analysis-progress-fill::after,
+  .batch-lane-fill.is-running { animation: none; }
+}
+</style>
+
+<style scoped>
+.ontology-review-dialog { width: min(1120px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); margin: auto; padding: 0; border: 1px solid var(--border); border-radius: 20px; background: var(--surface); color: var(--text); overflow: auto; box-shadow: 0 24px 80px #0f172a33; }
+.ontology-review-dialog::backdrop { background: #0f172a66; backdrop-filter: blur(3px); }
+</style>

@@ -8,6 +8,7 @@ import { readKnowledgeSourceAsset } from '../assets/routes.js';
 import { registerSourceIngest } from './source-ingest.js';
 import { registerWikiRoutes } from './wiki-routes.js';
 import { registerWikiGenerationRoutes } from './wiki-generation-routes.js';
+import { registerOntologyAnalysisControls } from './ontology-analysis-controls.js';
 import { getOrchestrator } from '../orchestration/routes.js';
 import { registerKnowledgeAccessGuard } from './access.js';
 import { KnowledgeCatalog } from './catalog.js';
@@ -23,6 +24,8 @@ import {
   OntologyGraphRequestSchema,
   OntologyQueryRequestSchema,
   OntologyWorkflowRequestSchema,
+  OntologyCandidateStageRequestSchema,
+  OntologyPreviewRequestSchema,
   OntologyDraftSaveRequestSchema,
   OntologyCandidateImportRequestSchema,
   OntologyExtractRequestSchema,
@@ -63,12 +66,15 @@ import {
   readOntologyModel, saveOntologyModel, inspectOntologyModel,
   updateBailianKnowledgeBase,
   updateKnowledgeBaseMeta,
+  type OntologyExtractionFailure,
+  OntologyExtractionControl,
 } from '@workexpert/agent-core';
 
-type AnalysisJobData = { id: string; knowledgeBaseId?: string; status: 'running'|'completed'|'failed'|'cancelled'; startedAt: number; completedAt?: number; phase: string; currentBatch: number; totalBatches: number; discovered?: number; result?: unknown; error?: string };
-type AnalysisJob = AnalysisJobData & { controller?: AbortController };
+type AnalysisBatchData = { slot: number; batchNumber: number; state: import('@workexpert/contracts').OntologyAnalysisBatchState; phase: string; chunkCount: number; documentTitles: string[]; startedAt: number; completedAt?: number; candidates?: number; failure?: OntologyExtractionFailure };
+type AnalysisJobData = import('@workexpert/contracts').OntologyAnalysisCheckpoint & { id: string; knowledgeBaseId?: string; status: 'running'|'completed'|'partial'|'failed'|'cancelled'; startedAt: number; completedAt?: number; phase: string; currentBatch: number; totalBatches: number; discovered?: number; failedBatches?: number; completedChunkIds?: string[]; failedChunkIds?: string[]; activeBatches?: AnalysisBatchData[]; failures?: OntologyExtractionFailure[]; result?: unknown; error?: string };
+type AnalysisJob = AnalysisJobData & { controller?: AbortController; control?: OntologyExtractionControl };
 function ontologyJobsFile() { return path.join(process.env.WORKEXPERT_DATA_DIR || path.join(os.homedir(), '.workexpert'), 'ontology-analysis-jobs.json'); }
-function publicJob(job: AnalysisJob): AnalysisJobData { const { controller: _controller, ...data } = job; return data; }
+function publicJob(job: AnalysisJob): AnalysisJobData { const { controller: _controller, control: _control, ...data } = job; return data; }
 function loadOntologyJobs(): Map<string, AnalysisJob> {
   try {
     const rows = JSON.parse(fs.readFileSync(ontologyJobsFile(), 'utf8')) as AnalysisJobData[];
@@ -90,9 +96,11 @@ function persistOntologyJobs() {
 if (ontologyJobs.size) persistOntologyJobs();
 
 function extractionWithModel(instructions: string | undefined, model: Awaited<ReturnType<typeof readOntologyModel>>) {
-  if (!model.entityTypes.length && !model.relationTypes.length) return instructions;
-  const entities = model.entityTypes.map((item) => `${item.name}${item.properties.length ? `（属性：${item.properties.map((property) => `${property.name}:${property.dataType}${property.required ? '必填' : ''}`).join('、')}）` : ''}`).join('；');
-  const relations = model.relationTypes.map((item) => `${item.name}（${item.subjectTypes.join('/') || '任意'} → ${item.objectTypes.join('/') || '任意'}）`).join('；');
+  const entityRules = model.entityTypes.filter((item) => item.reviewStatus === 'confirmed' && item.allowAiCreate);
+  const relationRules = model.relationTypes.filter((item) => item.reviewStatus === 'confirmed' && item.allowAiCreate);
+  if (!entityRules.length && !relationRules.length) return instructions;
+  const entities = entityRules.map((item) => `${item.name}${item.properties.length ? `（属性：${item.properties.map((property) => `${property.name}:${property.dataType}${property.required ? '必填' : ''}`).join('、')}）` : ''}`).join('；');
+  const relations = relationRules.map((item) => `${item.name}（${item.subjectTypes.join('/') || '任意'} → ${item.objectTypes.join('/') || '任意'}）`).join('；');
   return `${instructions?.trim() ? `${instructions.trim()}\n\n` : ''}请优先遵循当前知识模型。实体类型：${entities || '尚未定义'}。关系类型：${relations || '尚未定义'}。优先复用已有类型和关系；无法归类的内容仍可作为候选，但请降低置信度，交由用户确认。`;
 }
 
@@ -210,8 +218,8 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
   app.post('/knowledge/ontology/candidates/upsert', async (request, reply) => { const parsed = OntologyCandidateUpsertRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid candidate.' }); return { ok: true, workflow: await upsertOntologyCandidate(parsed.data.knowledgeBase, parsed.data.candidate) }; });
   app.post('/knowledge/ontology/candidates/delete', async (request, reply) => { const parsed = OntologyCandidateDeleteRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid candidate deletion.' }); return { ok: true, workflow: await deleteOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidateIds) }; });
   app.post('/knowledge/ontology/candidates/merge', async (request, reply) => { const parsed = OntologyCandidateMergeRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid candidate merge.' }); return { ok: true, workflow: await mergeOntologyCandidates(parsed.data.knowledgeBase, parsed.data.sourceCandidateIds, parsed.data.mergedCandidate) }; });
-  app.post('/knowledge/ontology/candidates/stage', async (request, reply) => { const parsed = OntologyWorkflowRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid stage request.' }); return { ok: true, workflow: await stageOntologyCandidates(parsed.data.knowledgeBase) }; });
-  app.post('/knowledge/ontology/preview', async (request, reply) => { const parsed = OntologyWorkflowRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid preview request.' }); return { ok: true, ...(await previewOntologyChanges(parsed.data.knowledgeBase)) }; });
+  app.post('/knowledge/ontology/candidates/stage', async (request, reply) => { const parsed = OntologyCandidateStageRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid stage request.' }); try { return { ok: true, workflow: await stageOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidateIds) }; } catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : '保存草稿失败，请重试。' }); } });
+  app.post('/knowledge/ontology/preview', async (request, reply) => { const parsed = OntologyPreviewRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid preview request.' }); return { ok: true, ...(await previewOntologyChanges(parsed.data.knowledgeBase, { draftOnly: parsed.data.draftOnly })) }; });
   app.post('/knowledge/ontology/draft/repair', async (request, reply) => { const parsed = OntologyWorkflowRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid repair request.' }); return { ok: true, ...(await repairOntologyDraft(parsed.data.knowledgeBase)) }; });
   app.post('/knowledge/ontology/governance/read', async (request, reply) => { const parsed = OntologyWorkflowRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid governance request.' }); return { ok: true, ...(await readOntologyGovernance(parsed.data.knowledgeBase)) }; });
   app.post('/knowledge/ontology/governance/apply', async (request, reply) => { const parsed = OntologyGovernanceApplyRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid governance commands.', issues: parsed.error.issues }); return { ok: true, ...(await applyOntologyGovernance(parsed.data.knowledgeBase, parsed.data.commands, parsed.data.source, parsed.data.actor)) }; });
@@ -225,10 +233,10 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
   app.post('/knowledge/ontology/analysis/start', async (request, reply) => {
     const parsed = OntologyExtractRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology extraction request.', issues: parsed.error.issues });
     const ontologyModel = await readOntologyModel(parsed.data.knowledgeBase);
-    const id = randomUUID(), controller = new AbortController();
+    const id = randomUUID(), controller = new AbortController(), control = new OntologyExtractionControl();
     const totalBatches = Math.max(1, Math.ceil(parsed.data.documentIds.length * 3 / (parsed.data.intensity === 'deep' ? 3 : 4)));
-    const job: AnalysisJob = { id, knowledgeBaseId: parsed.data.knowledgeBase.id, status: 'running', startedAt: Date.now(), phase: '读取文档', currentBatch: 0, totalBatches, controller }; ontologyJobs.set(id, job); persistOntologyJobs();
-    void extractOntologyCandidates({ kb: parsed.data.knowledgeBase, documentIds: parsed.data.documentIds, instructions: extractionWithModel(parsed.data.instructions, ontologyModel), model: parsed.data.model, intensity: parsed.data.intensity, signal: controller.signal, onProgress: (event) => { Object.assign(job, event); persistOntologyJobs(); } }).then((result) => { job.status = 'completed'; job.phase = '候选归并完成'; job.result = result; job.completedAt = Date.now(); persistOntologyJobs(); }).catch((error) => { job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = error instanceof Error ? error.message : String(error); job.completedAt = Date.now(); persistOntologyJobs(); });
+    const job: AnalysisJob = { id, knowledgeBaseId: parsed.data.knowledgeBase.id, status: 'running', startedAt: Date.now(), phase: '读取文档', currentBatch: 0, totalBatches, controller, control }; ontologyJobs.set(id, job); persistOntologyJobs();
+    void extractOntologyCandidates({ kb: parsed.data.knowledgeBase, documentIds: parsed.data.documentIds, chunkIds: parsed.data.chunkIds, instructions: extractionWithModel(parsed.data.instructions, ontologyModel), model: parsed.data.model, intensity: parsed.data.intensity, signal: controller.signal, control, onProgress: (event) => { Object.assign(job, event); if (job.stopRequested) job.phase = '正在停止并保存结果'; persistOntologyJobs(); }, onDiagnostic: (failure) => { const userAction = failure.category === 'user_skipped' || failure.category === 'user_stopped'; app.log[userAction ? 'info' : 'warn']({ event: userAction ? 'ontology.extraction.batch_skipped' : 'ontology.extraction.batch_failed', jobId: id, knowledgeBaseId: parsed.data.knowledgeBase.id, provider: parsed.data.model.provider, model: parsed.data.model.chatModel, ...failure }, 'Ontology extraction batch did not complete'); } }).then((result) => { job.status = result.failedChunkIds.length ? 'partial' : 'completed'; job.phase = job.stopRequested ? '已停止，结果已保存' : result.failedChunkIds.length ? '部分内容待继续' : '候选归并完成'; job.result = result; job.failures = result.failures; job.failedBatches = result.failedBatches; job.skippedChunkIds = result.skippedChunkIds; job.completedAt = Date.now(); persistOntologyJobs(); }).catch((error) => { job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = error instanceof Error ? error.message : String(error); job.completedAt = Date.now(); app.log.error({ event: 'ontology.extraction.failed', jobId: id, knowledgeBaseId: parsed.data.knowledgeBase.id, error: job.error }, 'Ontology extraction job failed'); persistOntologyJobs(); });
     return { ok: true, jobId: id };
   });
   for (const action of ['status', 'cancel'] as const) app.post(`/knowledge/ontology/analysis/${action}`, async (request, reply) => {
@@ -243,6 +251,16 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
     job.controller?.abort();
     if (job.status === 'running') { job.status = 'cancelled'; job.phase = '已取消'; job.completedAt = Date.now(); persistOntologyJobs(); }
     return { ok: true };
+  });
+
+  registerOntologyAnalysisControls(app, {
+    findJob: id => ontologyJobs.get(id),
+    canAccess: (request, id) => {
+      if (!request.auth) return false;
+      try { new KnowledgeCatalog().resolve(request.auth, id); return true; } catch { return false; }
+    },
+    publicJob,
+    persist: persistOntologyJobs,
   });
 
   app.post('/knowledge/bailian/pipelines', async (request, reply) => {
