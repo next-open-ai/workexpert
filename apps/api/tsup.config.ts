@@ -8,7 +8,7 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   // Contracts are part of the API's executable boundary, not a separate runtime package.
-  noExternal: ['@workexpert/contracts', '@workexpert/agent-core', '@workexpert/tools', '@workexpert/orchestrator'],
+  noExternal: ['@workexpert/contracts', '@workexpert/storage', '@workexpert/agent-core', '@workexpert/tools', '@workexpert/orchestrator'],
   // Native addon; resolve at runtime from node_modules instead of bundling.
   external: ['@lancedb/lancedb'],
   // @mariozechner/pi-coding-agent is ESM and uses import.meta.url at module load.

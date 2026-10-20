@@ -1,4 +1,5 @@
 import { Agent, type AgentMessage } from '@mariozechner/pi-agent-core';
+import { WORKEXPERT_IDENTITY, runtimeToolInventory } from './runtime-identity.js';
 import {
   createAssistantMessageEventStream,
   streamSimple,
@@ -646,7 +647,7 @@ function yieldArtifactEvents(
 
 /**
  * Agent loop powered by @mariozechner/pi-agent-core + pi-ai.
- * Emits the same QuantumAI AgentEvent stream as the previous AI SDK path.
+ * Emits the same WorkExpert AgentEvent stream as the previous AI SDK path.
  */
 export async function* streamAgentReply(input: {
   profile: AgentProfile;
@@ -732,7 +733,7 @@ export async function* streamAgentReply(input: {
     const searchTools = createWebSearchTools(input.searchProviders ?? []);
     const builtinSearchOn = Boolean(input.model.enableSearch) && supportsBuiltinEnableSearch(input.model.provider);
 
-    const runtimeInstructions = [
+    let runtimeInstructions = [
       input.profile.instructions,
       (input.modelCapabilities ?? []).length
         ? `Authorized specialist model capabilities for this run: ${(input.modelCapabilities ?? []).map((item) => `${item.capability} (${item.mode})`).join(', ')}. Use their typed tools only for matching subtasks. "preferred" means prefer the specialist after a task match; it does not replace planning or justify unrelated calls.`
@@ -755,7 +756,7 @@ export async function* streamAgentReply(input: {
       skillFirstExecutionContract(projectBound),
       workspaceModeContract(workspaceMode),
       'Associated Skill instructions are preloaded before the first model turn whenever available, so prefer those specialized procedures immediately instead of exploring generic alternatives. Preloading is for reasoning only: if you need packaged Skill files or bundled Skill scripts, call load_skill for that relevant user Skill first. Workspace and artifact operations are platform Tools, not a Skill: follow each Tool schema and result exactly. Skill files are read-only. Never claim an operation ran unless its Tool returned a successful result. For artifact requests, do not stop at a plan: produce and verify the file, then commit it with commit_artifact. Once a verified deliverable exists, stop calling tools and return the result. In the user-facing answer, refer to the delivered asset by its filename, not its internal workspace path. Use reasonable defaults for non-critical details; if a required permission, script, dependency, or output path is unavailable, state the exact blocker and the one next user action.',
-      'Agent runtime: QuantumAI pi-agent-core + pi-coding-agent skills catalog.',
+      'Agent runtime: WorkExpert pi-agent-core + pi-coding-agent skills catalog.',
       'This is a new execution. Tool retryScope=current_run and retryable=false from earlier conversation turns do not block this execution. If the latest user explicitly requests transcription or retry and ASR is authorized, call model_transcribe_audio instead of repeating a historical refusal. Only tool results actually obtained in this execution count as current attempts; never invent attempt counts. A failure obtained in this execution still stops automatic retries as specified by the tool.',
       input.decisionRuntime?.enabled && input.decisionRuntime.mode !== 'off' && input.decisionRuntime.agentTool
         ? 'Decision Skill: decision_evaluate is for bounded classification, scoring, routing, or yes/no probability questions. Supply only necessary state and explicit finite options. Do not use it for prose generation, arithmetic, or actions. Treat low-confidence output as uncertainty and ask the user when the choice materially changes the outcome. Platform safety checks are enforced separately and never depend on you remembering to call this tool.'
@@ -812,6 +813,7 @@ export async function* streamAgentReply(input: {
     // collectAgentTools resolves legacy name precedence before strict duplicate checks.
     const decisionTools = createDecisionAgentTool(input.decisionRuntime);
     const agentTools = guardAgentTools(createUnifiedToolSession(registrationsFromTools([...collectedTools, ...decisionTools])).nativeTools, input.decisionRuntime);
+    runtimeInstructions += `\n\n${WORKEXPERT_IDENTITY}\n\n${runtimeToolInventory(agentTools.map(tool => tool.name), mcp.labels)}`;
 
     let emittedText = false;
     let lastToolSucceeded: boolean | undefined;

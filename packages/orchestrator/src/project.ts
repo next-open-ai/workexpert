@@ -104,7 +104,7 @@ export interface ProjectServiceOptions {
    * confirming a project). Return null to leave the task failed with a clear
    * message. Never persists secrets.
    */
-  contextResolver?: (task: ProjectTask) => ChatRunContext | null | Promise<ChatRunContext | null>;
+  contextResolver?: (task: ProjectTask, ownerUserId?: string) => ChatRunContext | null | Promise<ChatRunContext | null>;
 }
 
 export interface ConfirmProjectInput {
@@ -766,7 +766,7 @@ export class ProjectService {
     if (project.status === 'draft') throw new Error('Project has not started yet.');
     if (task.status === 'running') throw new Error('Task is already running.');
 
-    const runContext = context ?? ((await this.contextResolver?.(task)) ?? undefined);
+    const runContext = context ?? ((await this.contextResolver?.(task, project.ownerUserId)) ?? undefined);
     if (!runContext) throw new Error('No run context available; configure a model first.');
     const started = await this.startTask(projectId, task, runContext);
     if (started) await this.maybeFinish(projectId);
@@ -817,7 +817,7 @@ export class ProjectService {
     // Allow: resume the same task as a new attempt. When the client sent no
     // context, assemble it server-side; also carry the granted network host into
     // the resumed context so the same tool call does not immediately re-park.
-    let resumeContext = input.resumeContext ?? ((await this.contextResolver?.(task)) ?? undefined);
+    let resumeContext = input.resumeContext ?? ((await this.contextResolver?.(task, project.ownerUserId)) ?? undefined);
     if (!resumeContext) return { resumed: false };
     if (approval?.capability === 'network-access') this.grantNetworkHostToContext(resumeContext, approval.summary);
     const resumed = await this.startTask(input.projectId, task, resumeContext);
@@ -916,11 +916,12 @@ export class ProjectService {
   private async resolveTaskContext(
     task: ProjectTask,
     input: ConfirmProjectInput,
+    ownerUserId?: string,
   ): Promise<ChatRunContext | undefined> {
     let runContext = input.runContextByTask?.[task.id] ?? input.defaultContext;
     if (!runContext && this.contextResolver) {
       try {
-        runContext = (await this.contextResolver(task)) ?? undefined;
+        runContext = (await this.contextResolver(task, ownerUserId)) ?? undefined;
       } catch {
         runContext = undefined;
       }
@@ -951,7 +952,8 @@ export class ProjectService {
       batch.map(async (task) => {
         try {
           if (!(await this.isAlive(projectId, projectRunId))) return;
-          const runContext = await this.resolveTaskContext(task, input);
+          const ownerUserId = (await this.getProject(projectId))?.ownerUserId;
+          const runContext = await this.resolveTaskContext(task, input, ownerUserId);
           if (!runContext) {
             await this.mutateProject(projectId, (fresh) => {
               const target = fresh.tasks.find((item) => item.id === task.id);

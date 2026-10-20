@@ -63,6 +63,7 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: 'SDD 索引', link: '/sdd/README' },
+          { text: 'WK · 证据驱动 Wiki（设计）', link: '/sdd/features/knowledge-wiki/README' },
           { text: 'UTI-001 · 统一 Tool Interface', link: '/sdd/features/unified-tool-interface/README' },
           { text: 'AMC-001 · 通用应用模型', link: '/sdd/features/application-model-capabilities/README' },
           { text: 'AMC-IMG-001 · 图片生成协议', link: '/sdd/features/application-model-capabilities/image-generation-protocols' },

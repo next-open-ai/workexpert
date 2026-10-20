@@ -8,12 +8,12 @@ import { detectBundledPython, doclingEnhancedComponentRoot, pptxEnhancedComponen
 import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '../auth/service.js';
 import { executeStorageCleanup, scanStorageCleanup } from './storage-cleanup.js';
 import { publicVoiceInputSettings, saveVoiceInputSettings } from '../voice/settings.js';
+import { registerKnowledgeOwnershipRoutes } from '../knowledge/ownership-routes.js';
 
 type SettingName =
   | 'model-settings'
   | 'search-settings'
   | 'knowledge-providers'
-  | 'knowledge-bases'
   | 'mcp-connections'
   | 'capability-skills'
   | 'capability-policies'
@@ -352,72 +352,6 @@ function mergeKnowledgeProviders(value: unknown) {
   };
 }
 
-function splitKnowledgeBases(value: unknown): SettingsEnvelope {
-  const rows = arrayOfRecords(value);
-  return {
-    meta: rows.map((item) => ({
-      id: String(item.id || ''),
-      name: String(item.name || ''),
-      provider: String(item.provider || ''),
-      enabled: item.enabled !== false,
-      description: String(item.description || ''),
-      dataDir: String(item.dataDir || ''),
-      baseUrl: String(item.baseUrl || ''),
-      externalId: String(item.externalId || ''),
-      categoryId: String(item.categoryId || ''),
-      workspaceId: String(item.workspaceId || ''),
-      accessKeyId: String(item.accessKeyId || ''),
-      embeddingBaseUrl: String(item.embeddingBaseUrl || ''),
-      embeddingModel: String(item.embeddingModel || ''),
-      embeddingMode: item.embeddingMode === 'model' ? 'model' : item.embeddingMode === 'system' ? 'system' : undefined,
-      embeddingModelConfigId: String(item.embeddingModelConfigId || ''),
-      ...(item.embeddingMeta && typeof item.embeddingMeta === 'object'
-        ? {
-            embeddingMeta: {
-              ...(Number(asRecord(item.embeddingMeta).dimension) ? { dimension: Number(asRecord(item.embeddingMeta).dimension) } : {}),
-              ...(typeof asRecord(item.embeddingMeta).normalize === 'boolean' ? { normalize: Boolean(asRecord(item.embeddingMeta).normalize) } : {}),
-              ...(Number(asRecord(item.embeddingMeta).maxBatch) ? { maxBatch: Number(asRecord(item.embeddingMeta).maxBatch) } : {}),
-              ...(Number(asRecord(item.embeddingMeta).maxInputChars) ? { maxInputChars: Number(asRecord(item.embeddingMeta).maxInputChars) } : {}),
-            },
-          }
-        : {}),
-      ...(item.indexState && typeof item.indexState === 'object'
-        ? {
-            indexState: {
-              status: String(asRecord(item.indexState).status || 'ready'),
-              ...(asRecord(item.indexState).signature ? { signature: String(asRecord(item.indexState).signature) } : {}),
-              ...(Number(asRecord(item.indexState).lastBuildAt) ? { lastBuildAt: Number(asRecord(item.indexState).lastBuildAt) } : {}),
-              ...(asRecord(item.indexState).lastBuildModel ? { lastBuildModel: String(asRecord(item.indexState).lastBuildModel) } : {}),
-              ...(asRecord(item.indexState).lastBuildError ? { lastBuildError: String(asRecord(item.indexState).lastBuildError) } : {}),
-            },
-          }
-        : {}),
-      documentCount: Number(item.documentCount) || 0,
-      updatedAt: Number(item.updatedAt) || Date.now(),
-    })),
-    secrets: {
-      bases: Object.fromEntries(rows.map((item) => [String(item.id || ''), {
-        apiKey: String(item.apiKey || ''),
-        accessKeySecret: String(item.accessKeySecret || ''),
-        embeddingApiKey: String(item.embeddingApiKey || ''),
-      }])),
-    },
-  };
-}
-
-function mergeKnowledgeBases(value: unknown) {
-  const envelope = isEnvelope(value) ? value : splitKnowledgeBases(value);
-  const meta = Array.isArray(asRecord({ meta: envelope.meta }).meta) ? envelope.meta : [];
-  const secrets = asRecord(envelope.secrets);
-  const baseSecrets = asRecord(secrets.bases);
-  return arrayOfRecords(meta).map((item) => ({
-    ...item,
-    apiKey: String(asRecord(baseSecrets[String(item.id || '')]).apiKey || ''),
-    accessKeySecret: String(asRecord(baseSecrets[String(item.id || '')]).accessKeySecret || ''),
-    embeddingApiKey: String(asRecord(baseSecrets[String(item.id || '')]).embeddingApiKey || ''),
-  }));
-}
-
 function splitMcpConnections(value: unknown): SettingsEnvelope {
   const rows = arrayOfRecords(value);
   return {
@@ -520,8 +454,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   app.get('/settings/knowledge/providers', async () => mergeKnowledgeProviders(readJson('knowledge-providers')));
   app.put('/settings/knowledge/providers', async (request) => mergeKnowledgeProviders(writeJson('knowledge-providers', splitKnowledgeProviders(request.body ?? {}))));
 
-  app.get('/settings/knowledge/bases', async () => mergeKnowledgeBases(readJson('knowledge-bases')));
-  app.put('/settings/knowledge/bases', async (request) => mergeKnowledgeBases(writeJson('knowledge-bases', splitKnowledgeBases(request.body ?? []))));
+  registerKnowledgeOwnershipRoutes(app);
 
   app.get('/settings/mcp/connections', async (request, reply) => {
     try {

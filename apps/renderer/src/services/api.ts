@@ -1,5 +1,6 @@
 import { getStoredSessionToken } from './auth';
 import { DSH_ENV_FIX_ACTION_ID } from '../features/dsh/environment-ui';
+import type { KnowledgeSourceSnapshot, KnowledgeRetrieval, KnowledgeParentContext, KnowledgeEvidence } from '@workexpert/contracts';
 
 /** All renderer API calls share the authenticated local-session boundary. */
 function fetch(input: RequestInfo | URL, init?: RequestInit) {
@@ -475,6 +476,9 @@ export type McpConnectionPayload =
   | { id: string; name: string; transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string>; cwd?: string; enabled: boolean; description?: string };
 
 export type KnowledgeBasePayload = {
+  ontologyEnabled?: boolean;
+  wikiRetrievalEnabled?: boolean;
+  wikiRelatedExpansionEnabled?: boolean;
   id: string;
   name: string;
   provider: 'lancedb' | 'bailian' | 'dify' | 'qdrant' | 'pinecone';
@@ -650,6 +654,7 @@ export async function ingestKnowledgeDocument(input: {
   content?: string;
   fileBase64?: string;
   fileName?: string;
+  assetId?: string;
   source?: string;
   model?: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string };
 }) {
@@ -667,6 +672,7 @@ export async function ingestKnowledgeDocument(input: {
     jobId?: string;
     status?: string;
     indexState?: KnowledgeBasePayload['indexState'];
+    sourceSnapshot?: KnowledgeSourceSnapshot;
   };
   if (!response.ok) throw new Error(body.message || `Knowledge ingest failed: ${response.status}`);
   return body as {
@@ -678,6 +684,7 @@ export async function ingestKnowledgeDocument(input: {
     jobId?: string;
     status?: string;
     indexState?: KnowledgeBasePayload['indexState'];
+    sourceSnapshot?: KnowledgeSourceSnapshot;
   };
 }
 
@@ -713,6 +720,7 @@ export type KnowledgeChunkRow = {
   content: string;
   source?: string;
   createdAt: number;
+  evidence?: KnowledgeEvidence;
 };
 
 export async function listKnowledgeDocuments(input: {
@@ -773,7 +781,7 @@ export async function searchKnowledge(input: {
 }) {
   return postKnowledge<{
     ok: true;
-    results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string }>;
+    results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; wiki?: import('@workexpert/contracts').WikiRecall; retrieval?: KnowledgeRetrieval; context?: KnowledgeParentContext }>;
   }>('/api/knowledge/search', input);
 }
 
@@ -809,9 +817,9 @@ export type OntologyQueryPlanPayload = {
 export type OntologyHybridSearchPayload = {
   ok: true;
   query: string;
-  strategy: 'vector-only' | 'ontology-enhanced';
+  strategy: 'vector-only' | 'hybrid' | 'ontology-enhanced';
   plan: OntologyQueryPlanPayload;
-  results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>;
+  results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string; wiki?: import('@workexpert/contracts').WikiRecall; retrieval?: KnowledgeRetrieval; context?: KnowledgeParentContext; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>;
 };
 
 export const readOntologyWorkflow = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/workflow/read', { knowledgeBase });

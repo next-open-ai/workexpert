@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export * from './task-templates.js';
+export * from './knowledge-evidence.js';
 
 export const HealthResponseSchema = z.object({
   status: z.literal('ok'),
@@ -367,6 +368,10 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   enabled: z.boolean().default(true),
   /** Use a published ontology to expand and rerank retrieval. Falls back to vector search on failure. */
   ontologyEnabled: z.boolean().optional(),
+  wikiRetrievalEnabled: z.boolean().optional(),
+  wikiRelatedExpansionEnabled: z.boolean().optional(),
+  /** Server-derived only: API authorization must overwrite any client-supplied value. */
+  wikiAccess: z.object({ orgId: z.string().min(1), userId: z.string().min(1), sourceRoot: z.string().min(1) }).optional(),
   description: z.string().max(500).optional(),
   /** Local LanceDB directory (absolute). */
   dataDir: z.string().max(1000).optional(),
@@ -394,22 +399,30 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   indexState: KnowledgeIndexStateSchema.optional(),
 });
 export type KnowledgeBaseRuntime = z.infer<typeof KnowledgeBaseRuntimeSchema>;
+export * from './knowledge-ownership.js';
 
-/** Allows an 8 MB source file after Base64 expansion, plus a small safety margin. */
-export const MAX_KNOWLEDGE_FILE_BASE64_CHARS = 12_000_000;
+export const MAX_LOCAL_KNOWLEDGE_FILE_BYTES = 20_000_000;
+export const MAX_BAILIAN_KNOWLEDGE_FILE_BYTES = 8_000_000;
+export const MAX_KNOWLEDGE_TEXT_CHARS = 200_000;
+/** Base64 expansion of the largest supported source file. */
+export const MAX_KNOWLEDGE_FILE_BASE64_CHARS = Math.ceil(MAX_LOCAL_KNOWLEDGE_FILE_BYTES / 3) * 4;
 
 export const KnowledgeIngestRequestSchema = z.object({
   knowledgeBase: KnowledgeBaseRuntimeSchema,
   title: z.string().min(1).max(240),
   /** Plain-text content. Optional when a supported binary document is provided. */
-  content: z.string().max(200_000).optional(),
+  content: z.string().max(MAX_KNOWLEDGE_TEXT_CHARS).optional(),
   /** Base64-encoded PDF/DOCX bytes for local parsing, or document bytes for Bailian upload. */
   fileBase64: z.string().max(MAX_KNOWLEDGE_FILE_BASE64_CHARS).optional(),
   fileName: z.string().max(240).optional(),
+  /** Import an owned asset as an immutable local knowledge source snapshot. */
+  assetId: z.string().min(1).max(512).optional(),
   source: z.string().max(500).optional(),
   model: ModelConfigSchema.optional(),
-}).refine((value) => Boolean(value.content?.trim() || value.fileBase64?.trim()), {
-  message: 'Either content or fileBase64 is required.',
+}).refine((value) => Boolean(value.content?.trim() || value.fileBase64?.trim() || value.assetId), {
+  message: 'Either content, fileBase64 or assetId is required.',
+}).refine((value) => !value.assetId || (value.knowledgeBase.provider === 'lancedb' && value.content === undefined && value.fileBase64 === undefined), {
+  message: 'assetId requires a local knowledge base and cannot be combined with content or fileBase64.',
 });
 export type KnowledgeIngestRequest = z.infer<typeof KnowledgeIngestRequestSchema>;
 
@@ -753,3 +766,5 @@ export type DurableTask = z.infer<typeof DurableTaskSchema>;
 
 export * from './data-schema.js';
 export * from './voice-asr.js';
+export * from './knowledge-wiki.js';
+export * from './wiki-generation.js';

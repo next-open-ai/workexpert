@@ -511,11 +511,8 @@ export function useMcpConfig() {
   };
 
   const runtimePayload = (ids?: string[]) => {
-    // Auto-default: useful stdio MCPs, skip heavy browser automation unless explicitly selected.
-    const AUTO_SKIP = new Set(['mcp-baseline-playwright', 'mcp-baseline-chrome-devtools']);
-    const rows = ids?.length
-      ? byIds(ids)
-      : associable().filter((item) => !AUTO_SKIP.has(item.id));
+    // Only explicitly associated connectors may enter a run. Empty means none.
+    const rows = byIds(ids ?? []);
     const rank = (id: string) => {
       if (id.includes('stock') || id.includes('akshare')) return 0;
       if (id.includes('fetch') || id.includes('memory')) return 1;

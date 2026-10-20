@@ -829,7 +829,7 @@ function retrievalRouteLabel(
     ? "图谱证据"
     : route === "ontology-vector"
       ? "本体扩展"
-      : "原始向量";
+      : "原始查询";
 }
 function candidateTitle(item: Candidate) {
   return item.kind === "node"
@@ -2130,7 +2130,7 @@ onUnmounted(() => {
                   </div>
                   <span
                     class="shrink-0 rounded-full bg-[var(--accent)]/10 px-2 py-1 text-[11px] font-semibold text-[var(--accent)]"
-                    >{{ (hit.score * 100).toFixed(1) }}%</span
+                    >{{ hit.retrieval ? `排序分 ${hit.score.toFixed(3)}` : `${(hit.score * 100).toFixed(1)}%` }}</span
                   >
                 </div>
                 <p
@@ -2138,6 +2138,10 @@ onUnmounted(() => {
                 >
                   {{ hit.content }}
                 </p>
+                <details v-if="hit.context" class="mt-2 text-xs text-[var(--muted)]">
+                  <summary class="cursor-pointer font-semibold">查看上下文</summary>
+                  <pre class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-[var(--surface-muted)] p-3 leading-relaxed">{{ hit.context.content }}</pre>
+                </details>
               </article>
             </div>
             <div

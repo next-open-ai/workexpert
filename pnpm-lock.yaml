@@ -72,6 +72,9 @@ importers:
       '@workexpert/orchestrator':
         specifier: workspace:*
         version: link:../../packages/orchestrator
+      '@workexpert/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       apache-arrow:
         specifier: 18.1.0
         version: 18.1.0
@@ -205,6 +208,9 @@ importers:
       '@workexpert/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@workexpert/storage':
+        specifier: workspace:*
+        version: link:../storage
       '@workexpert/tools':
         specifier: workspace:*
         version: link:../tools
@@ -248,7 +254,11 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
-  packages/storage: {}
+  packages/storage:
+    dependencies:
+      '@workexpert/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
   packages/tools:
     dependencies:

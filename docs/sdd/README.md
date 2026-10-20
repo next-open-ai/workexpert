@@ -6,10 +6,13 @@
 
 | 功能 | 入口 | 状态 |
 | --- | --- | --- |
+| 对话身份与显式 MCP 关联 | [features/chat-capability-boundary.md](features/chat-capability-boundary.md) | CB-01～03，实际验证见规格状态 |
 | 统一 Agent Tool Interface | [features/unified-tool-interface/README.md](features/unified-tool-interface/README.md) | 已同步实现，待 WorkExpert 真实引擎验收 |
 | 通用应用模型机制 | [features/application-model-capabilities/README.md](features/application-model-capabilities/README.md) | 已同步实现，待真实 Provider 验收 |
 | 图片理解：主模型直读/应用模型定向识图 | [features/image-understanding/README.md](features/image-understanding/README.md) | Pi M1/M2 工程闭环通过，待真实 Provider/安装态验收 |
 | 本体增强 RAG 第一阶段 | [features/ontology-rag-phase-1/README.md](features/ontology-rag-phase-1/README.md) | 实施中 |
+| 统一知识证据与版本 | [features/knowledge-evidence/README.md](features/knowledge-evidence/README.md) | 实施中 |
+| 证据驱动的知识 Wiki | [features/knowledge-wiki/README.md](features/knowledge-wiki/README.md) | 实施中，契约/仓储底座阶段 |
 | Windows 开始菜单注册 | [features/windows-start-menu-registration/README.md](features/windows-start-menu-registration/README.md) | 待验证 |
 | 发布完整性 | [features/release-readiness/README.md](features/release-readiness/README.md) | 实施中 |
 

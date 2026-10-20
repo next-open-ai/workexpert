@@ -3,11 +3,12 @@ import os from 'node:os';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { getSharedAgentscopeRuntimeStats, saveChatImage, readChatImage, ImageInputError } from '@workexpert/agent-core';
 import { ChatFilesSchema, ChatImagesSchema, DurableTaskArtifactRoleSchema, DurableTaskStatusSchema } from '@workexpert/contracts';
-import { JsonFileStore, Orchestrator, createScriptedRunner, type AgentRunner, type OrcEvent } from '@workexpert/orchestrator';
+import { JsonFileStore, Orchestrator, createScriptedRunner, agentCoreRunner, type AgentRunner, type OrcEvent } from '@workexpert/orchestrator';
+import { authorizeRunKnowledge } from '../knowledge/access.js';
 import type { ChatRunContext, ConfirmProjectInput, CreateProjectDraftInput, ProjectTask, ResolveProjectApprovalInput, UpdateProjectAccessInput } from '@workexpert/orchestrator';
 import { requireAuth } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource, requireSystemAdmin } from '../auth/ownership.js';
-import { resolveEmployeeMcpConnections, resolveTaskContext } from './context-assembler.js';
+import { authorizeRunMcp, resolveEmployeeMcpConnections, resolveTaskContext } from './context-assembler.js';
 import { applyParentSecrets } from './secrets.js';
 import { chatAttachmentStats, cleanupChatAttachments, deleteChatFile, deleteChatFiles, readChatFile, resolveChatFiles, saveChatFile } from './chat-attachments.js';
 
@@ -55,10 +56,10 @@ export function getOrchestrator(): Orchestrator {
   if (!instance) {
     const runner = scriptedRunner();
     const store = new JsonFileStore(path.join(dataDir(), 'domain.json'));
-    const contextResolver = async (task: ProjectTask): Promise<ChatRunContext | null> => {
+    const contextResolver = async (task: ProjectTask, ownerUserId?: string): Promise<ChatRunContext | null> => {
       // Remote confirm without client context → assemble from domain KV + keyring.
       try {
-        return await resolveTaskContext(store, task);
+        return await resolveTaskContext(store, task, ownerUserId);
       } catch {
         return null;
       }
@@ -85,7 +86,15 @@ export function getOrchestrator(): Orchestrator {
     };
     instance = new Orchestrator({
       store,
-      ...(runner ? { runner } : {}),
+      runner: {
+        async start(request, emit, options) {
+          // Trust the persisted run principal, never client-supplied context identities.
+          const run = request.runId ? await instance?.engine.load(request.runId) : undefined;
+          const authorized = authorizeRunKnowledge(request, { orgId: run?.orgId, userId: run?.ownerUserId ?? run?.userId });
+          const withMcp = await authorizeRunMcp(store, authorized, run?.ownerUserId ?? run?.userId);
+          return (runner ?? agentCoreRunner).start(withMcp, emit, options);
+        },
+      },
       maxConcurrentRunsGlobal: positiveIntFromEnv('WORKEXPERT_MAX_CONCURRENT_RUNS_GLOBAL', 4),
       maxConcurrentRunsPerUser: positiveIntFromEnv('WORKEXPERT_MAX_CONCURRENT_RUNS_PER_USER', 2),
       maxQueueWaitMs: positiveIntFromEnv('WORKEXPERT_MAX_QUEUE_WAIT_MS', 120_000),
@@ -181,6 +190,7 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     }
     const key = request.query && typeof request.query === 'object' ? String((request.query as Record<string, unknown>).key ?? '') : '';
     const prefix = request.query && typeof request.query === 'object' ? String((request.query as Record<string, unknown>).prefix ?? '') : '';
+    if (key === 'capabilities.knowledge' || key.endsWith(':capabilities.knowledge')) return reply.code(409).send({ message: '请使用知识库配置接口。' });
     if (key) return { key, value: await orch.store.get(key) };
     const keys = await orch.store.keys(prefix);
     return { keys, prefix };
@@ -197,6 +207,7 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     }
     const body = (request.body ?? {}) as { key?: unknown; value?: unknown };
     const key = String(body.key ?? '');
+    if (key === 'capabilities.knowledge' || key.endsWith(':capabilities.knowledge')) return reply.code(409).send({ message: '请使用知识库配置接口。' });
     if (!key) return fail(reply, new Error('key is required.'));
     const value = body.value == null ? '' : String(body.value);
     await orch.store.set(key, value);
@@ -212,6 +223,7 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     }
     const body = (request.body ?? {}) as { key?: unknown };
     const key = String(body.key ?? '');
+    if (key === 'capabilities.knowledge' || key.endsWith(':capabilities.knowledge')) return reply.code(409).send({ message: '请使用知识库配置接口。' });
     if (!key) return fail(reply, new Error('key is required.'));
     await orch.store.delete(key);
     return { ok: true, key };

@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('workexpertDesktop', {
   importGitSkill: (url) => ipcRenderer.invoke('workexpert:import-git-skill', url),
   findSkills: (query, batchCount) => ipcRenderer.invoke('workexpert:find-skills', query, batchCount),
   openExternal: (url) => ipcRenderer.invoke('workexpert:open-external', url),
+  openWikiSnapshot: (html, external) => ipcRenderer.invoke('workexpert:open-wiki-snapshot', html, external),
   getModelConfig: () => ipcRenderer.invoke('workexpert:get-model-config'),
   saveModelConfig: (config) => ipcRenderer.invoke('workexpert:save-model-config', config),
   getSearchConfig: () => ipcRenderer.invoke('workexpert:get-search-config'),

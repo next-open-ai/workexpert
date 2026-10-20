@@ -65,7 +65,8 @@ WorkExpert 是**本地优先的数字员工工作台**：不是单一聊天工�
 | `tools` | `OpcaiTool{id,risk,inputSchema,execute}` + `ToolPolicy` | 契约层 |
 | `orchestrator` | **编排核心**（见 §5）：含 **Session Rolling Memory** | 纯 Node，测试友好（runner 可注入） |
 | `channel` | 通道协议与核心 | 传输无关 |
-| `storage` / `ui-kit` | 占位 | 待接入 |
+| `storage` | KV 接口、不可变文件对象、SQLite 原文引用和证据批次仓储 | 依赖 contracts；API 本地入库已接归档、证据保存与有效批次发布 |
+| `ui-kit` | 占位 | 待接入 |
 
 ## 5. `@workexpert/orchestrator` 主要逻辑（M0 核心）
 
@@ -245,7 +246,20 @@ API：
 
 ## 9. 已知限制与后续
 
+- 对话执行采用[显式 MCP 关联](../sdd/features/chat-capability-boundary.md)：空关联不自动加载，已知用户不回退其他用户/全局连接，API执行前按保存关联重建MCP清单。平台身份统一WorkExpert，能力介绍依据本次工具，不将技能目录或历史回答视为授权。旧连接配置保留，原依赖隐式加载者需在员工详情勾选。
+
+- [ADR-0009](./adr/0009-optional-wiki-retrieval.md) / WK-T10：本地库可选择将已发布Wiki词法候选与原文（含可选本体增强）候选进行外层RRF融合。缺省关闭，不建设Wiki向量；派生页单独带wiki身份及原文引用，不冒充原文证据。API根据已验证身份构造运行上下文，查询结果再次核验来源/发布版本；详见Wiki SDD，下面“Wiki尚未接入”指此前原文基线的历史范围。
+
+- Wiki 生成新增 [WK-T04b 有界分批](../sdd/features/knowledge-wiki/batching.md)：最多 400 块/192,000 字符，orchestrator 顺序运行最多 8 批；agent-core 保守汇集同名候选章节，保留证据与互链。沿用 SQLite v6、库级守卫和人工发布，不新增权限或服务。下文“完整长文合并仍待后续”特指语义消歧、已有页融合和断点续算，不再意味着所有输入必须一次模型调用完成。
+
+- 知识库归属依据 [ADR-0008](./adr/0008-knowledge-base-ownership.md)：新库归创建者，旧库不认领，由管理员通过专用 API 指派同组织有效用户。桌面/Web 配置统一到 API，普通保存只更新本人子集；旧 domain KV 知识库配置只读兼容，原文件不搬动。知识操作及数字员工执行前按持久化身份检查库归属，客户端目录不作为执行事实源。WK-T09a 已接归属与守卫，Wiki/原文库内继承迁移和管理员图形入口仍待 WK-T09b；以下个人 Wiki 描述为过渡实现，不代表目标仍是页面级用户隔离。
+
+- Wiki 依据已接受的 [ADR-0006](./adr/0006-evidence-driven-wiki.md)、[ADR-0007 个人授权边界](./adr/0007-personal-wiki-authorization.md) 与 [Wiki SDD](../sdd/features/knowledge-wiki/README.md) 分阶段实施：页面修订、FTS/BM25、互链、来源失效、HTTP 已接线；[小批量闭环](../sdd/features/knowledge-wiki/closure.md) 增加 agent-core 单次有界生成、orchestrator 调度/取消/中断识别、SQLite 持久任务与网页核对发布/搜索/来源入口。首次显式生成在一致备份后升级证据库 v4/v5→v6，普通读写兼容 v6；GET 不初始化或迁移（任务状态 GET 可将旧活动任务标记中断）。模型调用不持有写事务，不自动发布或重启计费。T06b 复用已有修订/CAS 接入按现有章节编辑和版本文本对照，不新增 schema；完整长文合并、历史恢复仍待后续。本体、Wiki 向量化及外部 Provider 均非前置依赖，项目编排与数字员工边界不变。
+
 - 网关对 IM/中继的会话回复目前为**确定性轮询取终态**；SSE 直播（先订后发问题）待迭代。
 - 中继为**纯转发最小实现**：无订阅/广播/离线队列；外部终端 Web 控制台与设备配对 UI 待做。
-- `packages/storage`、`packages/ui-kit` 仍为占位；部分旧文档（`docs/architecture/overview.md`、`docs/sdd/*`）为早期描述，以本文档与 `docs/architecture/*` 为准。
+- 知识存储目标为原文件对象 + SQLite 权威证据/Wiki + LanceDB 可重建检索副本。API 本地入库先归档原文，按用户与组织隔离；旧资产导入采用独立快照，旧资产更新/删除不修改快照。暂不做共享资产转存、跨用户去重、自动清理或历史回填。原生 SQLite 的最低 Node 版本声明为 22.13.0。
+- 本地知识新入库在 API 进程调用 agent-core/storage：原文快照 → SQLite 证据批次 → LanceDB 检索副本 → 有效头 CAS 与 FTS 发布。各知识库 evidence schema v4 含分块归属、逻辑删除、全文派生投影和可选父块证据 payload；向量、FTS、列表与本体证据召回共享可见性约束。SQLite FTS5/BM25 与 cosine 向量以 RRF 融合，旧无版本数据首次查询补全文索引、不伪造版本。LanceDB 现有 chunks 表结构不变；原生 ANN 及 Wiki 尚未接入。决策见 [ADR-0005](./adr/0005-local-hybrid-retrieval.md)。
+- 新本地入库用结构启发式分块（标题/段落/列表/管道表格/围栏），记录规范化解析文本 UTF-16 位置；仅子块进入向量/全文/计数，父块保存在 SQLite 批次 JSON。查询最终 TopK 后恢复同版本上下文、去重并限定总长，删除任何同父子块会抑制该父块展开，防止旧内容借上下文回流。旧数据不自动重分块；详见 [KE-T04b](../sdd/features/knowledge-evidence/README.md)。
+- `packages/ui-kit` 仍为占位；部分旧文档（`docs/architecture/overview.md`、`docs/sdd/*`）为早期描述，以本文档与 `docs/architecture/*` 为准。
 - 本地用户与 owner 隔离已实现；Telegram、飞书和 Relay 的远程身份仍使用字符串白名单、默认拒绝，尚无统一远程身份映射。

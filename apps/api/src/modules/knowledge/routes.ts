@@ -4,13 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { requireAdmin } from '../auth/service.js';
+import { readKnowledgeSourceAsset } from '../assets/routes.js';
+import { registerSourceIngest } from './source-ingest.js';
+import { registerWikiRoutes } from './wiki-routes.js';
+import { registerWikiGenerationRoutes } from './wiki-generation-routes.js';
+import { getOrchestrator } from '../orchestration/routes.js';
+import { registerKnowledgeAccessGuard } from './access.js';
+import { KnowledgeCatalog } from './catalog.js';
 import {
   BailianCreateKnowledgeRequestSchema,
   BailianDeleteKnowledgeRequestSchema,
   KnowledgeChunksRequestSchema,
   KnowledgeDeleteChunkRequestSchema,
   KnowledgeDeleteDocumentRequestSchema,
-  KnowledgeIngestRequestSchema,
   KnowledgeJobStatusRequestSchema,
   KnowledgeManageRequestSchema,
   KnowledgeSearchRequestSchema,
@@ -33,6 +39,7 @@ import {
   deleteKnowledgeBaseRemote,
   getKnowledgeJobStatus,
   ingestKnowledge,
+  identifyKnowledgeVersion,
   listBailianKnowledgeBases,
   listBailianPipelines,
   listKnowledgeChunks,
@@ -58,7 +65,7 @@ import {
   updateKnowledgeBaseMeta,
 } from '@workexpert/agent-core';
 
-type AnalysisJobData = { id: string; status: 'running'|'completed'|'failed'|'cancelled'; startedAt: number; completedAt?: number; phase: string; currentBatch: number; totalBatches: number; discovered?: number; result?: unknown; error?: string };
+type AnalysisJobData = { id: string; knowledgeBaseId?: string; status: 'running'|'completed'|'failed'|'cancelled'; startedAt: number; completedAt?: number; phase: string; currentBatch: number; totalBatches: number; discovered?: number; result?: unknown; error?: string };
 type AnalysisJob = AnalysisJobData & { controller?: AbortController };
 function ontologyJobsFile() { return path.join(process.env.WORKEXPERT_DATA_DIR || path.join(os.homedir(), '.workexpert'), 'ontology-analysis-jobs.json'); }
 function publicJob(job: AnalysisJob): AnalysisJobData { const { controller: _controller, ...data } = job; return data; }
@@ -90,24 +97,13 @@ function extractionWithModel(instructions: string | undefined, model: Awaited<Re
 }
 
 export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
-  // The UI accepts source files up to 8 MB. Base64 expands those bytes by roughly
-  // one third, so this route needs a larger limit than Fastify's 1 MB default.
-  app.post('/knowledge/ingest', { bodyLimit: 16 * 1024 * 1024 }, async (request, reply) => {
-    const parsed = KnowledgeIngestRequestSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ingest request.', issues: parsed.error.issues });
-    try {
-      return await ingestKnowledge({
-        kb: parsed.data.knowledgeBase,
-        title: parsed.data.title,
-        content: parsed.data.content,
-        fileBase64: parsed.data.fileBase64,
-        fileName: parsed.data.fileName,
-        source: parsed.data.source,
-        model: parsed.data.model,
-      });
-    } catch (error) {
-      return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ingest failed.' });
-    }
+  registerKnowledgeAccessGuard(app);
+  registerWikiRoutes(app, { dataRoot: () => process.env.WORKEXPERT_DATA_DIR || path.join(os.homedir(), '.workexpert') });
+  registerWikiGenerationRoutes(app, { dataRoot: () => process.env.WORKEXPERT_DATA_DIR || path.join(os.homedir(), '.workexpert'),
+    dispatcher: () => getOrchestrator().dispatcher });
+  registerSourceIngest(app, {
+    dataRoot: () => process.env.WORKEXPERT_DATA_DIR || path.join(os.homedir(), '.workexpert'),
+    ingest: ingestKnowledge, identifyVersion: identifyKnowledgeVersion, readAsset: readKnowledgeSourceAsset,
   });
 
   app.post('/knowledge/search', async (request, reply) => {
@@ -231,12 +227,23 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
     const ontologyModel = await readOntologyModel(parsed.data.knowledgeBase);
     const id = randomUUID(), controller = new AbortController();
     const totalBatches = Math.max(1, Math.ceil(parsed.data.documentIds.length * 3 / (parsed.data.intensity === 'deep' ? 3 : 4)));
-    const job: AnalysisJob = { id, status: 'running', startedAt: Date.now(), phase: '读取文档', currentBatch: 0, totalBatches, controller }; ontologyJobs.set(id, job); persistOntologyJobs();
+    const job: AnalysisJob = { id, knowledgeBaseId: parsed.data.knowledgeBase.id, status: 'running', startedAt: Date.now(), phase: '读取文档', currentBatch: 0, totalBatches, controller }; ontologyJobs.set(id, job); persistOntologyJobs();
     void extractOntologyCandidates({ kb: parsed.data.knowledgeBase, documentIds: parsed.data.documentIds, instructions: extractionWithModel(parsed.data.instructions, ontologyModel), model: parsed.data.model, intensity: parsed.data.intensity, signal: controller.signal, onProgress: (event) => { Object.assign(job, event); persistOntologyJobs(); } }).then((result) => { job.status = 'completed'; job.phase = '候选归并完成'; job.result = result; job.completedAt = Date.now(); persistOntologyJobs(); }).catch((error) => { job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = error instanceof Error ? error.message : String(error); job.completedAt = Date.now(); persistOntologyJobs(); });
     return { ok: true, jobId: id };
   });
-  app.post('/knowledge/ontology/analysis/status', async (request, reply) => { const parsed = OntologyAnalysisJobRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid job.' }); const job = ontologyJobs.get(parsed.data.jobId); if (!job) return reply.code(404).send({ message: '分析任务不存在或已超过保留期限。' }); return { ok: true, job: publicJob(job) }; });
-  app.post('/knowledge/ontology/analysis/cancel', async (request, reply) => { const parsed = OntologyAnalysisJobRequestSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ message: 'Invalid job.' }); const job = ontologyJobs.get(parsed.data.jobId); job?.controller?.abort(); if (job && job.status === 'running') { job.status = 'cancelled'; job.phase = '已取消'; job.completedAt = Date.now(); persistOntologyJobs(); } return { ok: true }; });
+  for (const action of ['status', 'cancel'] as const) app.post(`/knowledge/ontology/analysis/${action}`, async (request, reply) => {
+    if (!request.auth) return reply.code(401).send({ message: 'Authentication required.' });
+    const parsed = OntologyAnalysisJobRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid job.' });
+    const job = ontologyJobs.get(parsed.data.jobId);
+    if (!job?.knowledgeBaseId) return reply.code(404).send({ message: '分析任务不存在或不可访问。' });
+    try { new KnowledgeCatalog().resolve(request.auth, job.knowledgeBaseId); }
+    catch { return reply.code(404).send({ message: '分析任务不存在或不可访问。' }); }
+    if (action === 'status') return { ok: true, job: publicJob(job) };
+    job.controller?.abort();
+    if (job.status === 'running') { job.status = 'cancelled'; job.phase = '已取消'; job.completedAt = Date.now(); persistOntologyJobs(); }
+    return { ok: true };
+  });
 
   app.post('/knowledge/bailian/pipelines', async (request, reply) => {
     const body = (request.body || {}) as { apiKey?: string; baseUrl?: string; workspaceId?: string };

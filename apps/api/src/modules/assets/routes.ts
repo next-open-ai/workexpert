@@ -10,6 +10,7 @@ import type { AuthPrincipal } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource } from '../auth/ownership.js';
 import { getOrchestrator } from '../orchestration/routes.js';
 import { readChatFile } from '../orchestration/chat-attachments.js';
+import { readOwnedSourceFile } from './source-access.js';
 
 const require = createRequire(import.meta.url);
 
@@ -222,6 +223,12 @@ export async function readOwnedAssetBytes(assetId: string, auth: Pick<AuthPrinci
   const { row, target } = await assetFile(assetId);
   if (!canReadOwnedResource(row, { ...auth, role: 'member' }, { allowLegacyUnowned: true })) throw new Error('Asset not found.');
   return { row, content: fs.readFileSync(target) };
+}
+
+/** Knowledge imports create a durable copy; read-sharing alone must not grant that right. */
+export async function readKnowledgeSourceAsset(assetId: string, auth: Pick<AuthPrincipal, 'userId' | 'orgId'>) {
+  const { row, target } = await assetFile(assetId);
+  return readOwnedSourceFile({ owner: auth, asset: row, target, assetsRoot: path.join(dataDir(), 'assets') });
 }
 
 /**

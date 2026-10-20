@@ -1,4 +1,6 @@
 export { Orchestrator } from './orchestrator.js';
+export { WikiGenerationService, WikiGenerationError } from './wiki-generation.js';
+export type { WikiJobRepository } from './wiki-generation.js';
 export { TemplateTaskService, TemplateTaskError } from './template-tasks.js';
 export type { OrchestratorOptions } from './orchestrator.js';
 export { EventHub } from './hub.js';

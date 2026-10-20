@@ -39,7 +39,7 @@ function localSeed(input: {
     args: input.args,
     env: input.env ?? {},
     cwd: input.cwd ?? '',
-    enabled: input.enabled !== false,
+    enabled: input.enabled === true,
     description: input.description,
     requiresCredentials: input.requiresCredentials,
     credentialEnvKeys: input.credentialEnvKeys,

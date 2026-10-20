@@ -12,6 +12,7 @@ interface Window {
     materializeProjectAssets(root: string, assetIds: string[]): Promise<Array<{ relative: string; type: 'directory' | 'file' }>>;
     registerPreviewRoot(root: string): Promise<{ token: string; origin: string }>;
     registerAssetPreviewRoot(assetId: string): Promise<{ token: string; origin: string }>;
+    openWikiSnapshot(html: string, external?: boolean): Promise<void>;
     readProjectPreview(root: string, relative: string): Promise<{ kind: 'text' | 'binary'; name: string; relative?: string; content?: string; base64?: string; bytes: number; mimeType?: string }>;
     readAssetPreview(assetId: string): Promise<{ kind: 'text' | 'binary'; name: string; content?: string; base64?: string; bytes: number; mimeType?: string }>;
     revealProjectFile(root: string, relative: string): Promise<boolean>;

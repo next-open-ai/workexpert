@@ -6,25 +6,54 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { choosePort } from './lib/web-launcher.mjs';
+import { prepareKnowledgeSearchRegression } from './lib/knowledge-search-ui-regression.mjs';
+import { prepareKnowledgeLifecycleRegression } from './lib/knowledge-lifecycle-ui-regression.mjs';
+import { prepareWikiRegression } from './lib/wiki-ui-regression.mjs';
+
+if (process.argv.includes('--knowledge-search') && process.argv.includes('--knowledge-lifecycle')) {
+  throw new Error('Run mocked search UI and real lifecycle checks separately.');
+}
 
 const root = process.cwd();
 const dataDir = await mkdtemp(path.join(os.tmpdir(), 'workexpert-core-ui-'));
 const port = await choosePort(4477);
 const origin = `http://127.0.0.1:${port}`;
-const api = spawn(process.execPath, ['apps/api/dist/main.cjs'], {
-  cwd: root,
-  env: {
-    ...process.env,
-    WORKEXPERT_API_PORT: String(port),
-    WORKEXPERT_DATA_DIR: dataDir,
-    WORKEXPERT_ORCH_RUNNER: 'memory-echo',
-    WORKEXPERT_WEB_STATIC_DIR: path.join(root, 'apps/renderer/dist'),
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
 let logs = '';
-api.stdout.on('data', (chunk) => { logs += chunk; });
-api.stderr.on('data', (chunk) => { logs += chunk; });
+function startApi() {
+  const child = spawn(process.execPath, ['apps/api/dist/main.cjs'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      WORKEXPERT_API_PORT: String(port),
+      WORKEXPERT_DATA_DIR: dataDir,
+      WORKEXPERT_ORCH_RUNNER: 'memory-echo',
+      WORKEXPERT_WEB_STATIC_DIR: path.join(root, 'apps/renderer/dist'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { logs = (logs + chunk).slice(-16000); });
+  child.stderr.on('data', (chunk) => { logs = (logs + chunk).slice(-16000); });
+  return child;
+}
+let api = startApi();
+
+async function stopApi() {
+  if (api.exitCode !== null || api.signalCode !== null) return false;
+  const child = api;
+  const exited = once(child, 'exit');
+  let forced = false;
+  const timeout = setTimeout(() => { forced = true; child.kill('SIGKILL'); }, 10000);
+  try { child.kill('SIGTERM'); await exited; } finally { clearTimeout(timeout); }
+  return forced;
+}
+
+async function restartApi() {
+  const previousPid = api.pid;
+  assert.equal(await stopApi(), false, 'normal restart must not require forced termination');
+  api = startApi();
+  await waitForApi();
+  assert.notEqual(api.pid, previousPid, 'restart must create a new API process');
+}
 
 async function browserExecutable() {
   const candidates = [
@@ -51,10 +80,16 @@ async function waitForApi() {
 }
 
 let browser;
+let lifecycle;
+let wiki;
 try {
   await waitForApi();
   browser = await chromium.launch({ headless: true, executablePath: await browserExecutable() });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  if (process.argv.includes('--knowledge-lifecycle')) lifecycle = await prepareKnowledgeLifecycleRegression(page, dataDir);
+  if (process.argv.includes('--wiki')) wiki = await prepareWikiRegression(page);
+  const runKnowledgeSearchRegression = process.argv.includes('--knowledge-search')
+    ? await prepareKnowledgeSearchRegression(page) : undefined;
   const pageErrors = [];
   const unauthorized = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -120,6 +155,9 @@ try {
     await page.waitForFunction((pattern) => new RegExp(pattern).test(document.querySelector('main')?.innerText || ''), expected.source);
   }
 
+  await runKnowledgeSearchRegression?.();
+  await lifecycle?.run(dismissStartupDialogs, restartApi);
+  await wiki?.run(dismissStartupDialogs, restartApi);
   await page.getByRole('button', { name: '打开账户与设置菜单' }).click();
   await page.getByRole('menuitem', { name: '设置' }).click();
   await page.getByText(/模型|Provider|账户/).first().waitFor();
@@ -127,10 +165,8 @@ try {
   console.log('[core-ui] bootstrap, session, lazy navigation, settings and empty-state journeys: PASS');
 } finally {
   await browser?.close();
-  if (api.exitCode === null) {
-    const exited = once(api, 'exit');
-    api.kill('SIGTERM');
-    await exited;
-  }
+  await lifecycle?.close();
+  await wiki?.close();
+  await stopApi();
   await rm(dataDir, { recursive: true, force: true });
 }

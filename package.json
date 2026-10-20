@@ -9,7 +9,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "bin": {
     "workexpert": "./bin/workexpert.mjs"
@@ -52,6 +52,7 @@
     ]
   },
   "scripts": {
+    "knowledge:acceptance": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/agent-core build && node --test packages/agent-core/dist/test/knowledge-acceptance.test.js packages/agent-core/dist/test/knowledge-hybrid.test.js packages/agent-core/dist/test/knowledge-context.test.js packages/agent-core/dist/test/knowledge-versioned-runtime.test.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
@@ -75,6 +76,8 @@
     "voice:command:regression": "node scripts/voice-command-regression.mjs",
     "product:regression": "node scripts/workexpert-product-regression.mjs",
     "ui:core:regression": "node scripts/core-ui-browser-regression.mjs",
+    "ui:knowledge:regression": "pnpm --filter @workexpert/renderer build && node scripts/core-ui-browser-regression.mjs --knowledge-search",
+    "ui:knowledge:lifecycle": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/agent-core build && pnpm --filter @workexpert/api build && pnpm --filter @workexpert/renderer build && node scripts/core-ui-browser-regression.mjs --knowledge-lifecycle",
     "npm:package:regression": "node scripts/npm-package-regression.mjs",
     "durable-task:regression": "node scripts/durable-task-regression.mjs",
     "gateway:stub": "node scripts/run-with-smoke-api.mjs scripts/gateway-stub-smoke.mjs",
@@ -86,6 +89,7 @@
     "esight:contracts:regression": "pnpm --filter @workexpert/contracts build && node scripts/esight-contracts-regression.mjs",
     "mcp:user-scope:regression": "node scripts/mcp-user-scope-regression.mjs",
     "manual:generate": "node scripts/generate-user-manual.mjs",
+    "ui:wiki": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/agent-core build && pnpm --filter @workexpert/orchestrator build && pnpm --filter @workexpert/api build && pnpm --filter @workexpert/renderer build && node scripts/core-ui-browser-regression.mjs --wiki",
     "manual:images": "node scripts/optimize-user-manual-images.mjs",
     "manual:regression": "pnpm --filter @workexpert/renderer build && node scripts/user-manual-regression.mjs",
     "concurrency:loadtest": "node scripts/concurrency-loadtest.mjs",

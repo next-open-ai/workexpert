@@ -7,6 +7,7 @@ import {
   saveServerKnowledgeProviderConfig,
 } from '../services/api.js';
 import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById } from './model-config';
+import { getStoredSessionToken } from '../services/auth.js';
 
 export const knowledgeProviderIds = ['lancedb', 'bailian', 'dify', 'qdrant', 'pinecone'] as const;
 export type KnowledgeProviderId = (typeof knowledgeProviderIds)[number];
@@ -17,6 +18,8 @@ export interface KnowledgeBase {
   provider: KnowledgeProviderId;
   enabled: boolean;
   ontologyEnabled: boolean;
+  wikiRetrievalEnabled?: boolean;
+  wikiRelatedExpansionEnabled?: boolean;
   description?: string;
   /** Absolute or app-relative data dir for LanceDB */
   dataDir?: string;
@@ -91,12 +94,17 @@ export const knowledgeProviderMeta: Record<
   pinecone: { label: 'Pinecone', kind: 'cloud', needsApiKey: true, needsExternalId: true, needsBaseUrl: true, defaultBaseUrl: '' },
 };
 
-const basesKey = 'capabilities.knowledge';
 const providersKey = 'settings.knowledge-providers';
 const bases = ref<KnowledgeBase[]>([]);
 const providerSettings = ref<KnowledgeProviderSettings>(defaultProviderSettings());
 const basesLoaded = ref(false);
 const providersLoaded = ref(false);
+let savedBases: KnowledgeBase[] = [];
+export function resetKnowledgeConfig() {
+  bases.value = []; basesLoaded.value = false;
+  savedBases = [];
+  providerSettings.value = defaultProviderSettings(); providersLoaded.value = false;
+}
 
 export function defaultProviderSettings(): KnowledgeProviderSettings {
   return {
@@ -147,6 +155,8 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
     provider: provider as KnowledgeProviderId,
     enabled: raw.enabled !== false,
     ontologyEnabled: raw.ontologyEnabled !== false,
+    wikiRetrievalEnabled: raw.wikiRetrievalEnabled === true,
+    wikiRelatedExpansionEnabled: raw.wikiRelatedExpansionEnabled === true,
     description: raw.description ? String(raw.description) : '',
     dataDir: raw.dataDir ? String(raw.dataDir) : '',
     baseUrl: raw.baseUrl ? String(raw.baseUrl).trim() : '',
@@ -269,6 +279,8 @@ function toRuntime(item: KnowledgeBase) {
     provider: item.provider,
     enabled: true as const,
     ontologyEnabled: item.ontologyEnabled !== false,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled === true,
+    wikiRelatedExpansionEnabled: item.wikiRelatedExpansionEnabled === true,
     description: item.description || undefined,
     dataDir: item.dataDir?.trim() || undefined,
     baseUrl: creds.baseUrl,
@@ -291,10 +303,12 @@ function toRuntime(item: KnowledgeBase) {
 export function useKnowledgeConfig() {
   const loadProviders = async () => {
     if (providersLoaded.value) return;
+    const token = getStoredSessionToken();
     try {
       const stored = window.workexpertDesktop
         ? JSON.parse((await readStored(providersKey)) || '{}')
         : await getServerKnowledgeProviderConfig();
+      if (token !== getStoredSessionToken()) return;
       providerSettings.value = normalizeProviderSettings(stored);
     } catch {
       providerSettings.value = defaultProviderSettings();
@@ -313,15 +327,18 @@ export function useKnowledgeConfig() {
   };
 
   const load = async () => {
+    const token = getStoredSessionToken();
     await loadProviders();
+    if (token !== getStoredSessionToken()) return;
     if (basesLoaded.value) return;
     try {
-      const stored = window.workexpertDesktop
-        ? JSON.parse((await readStored(basesKey)) || '[]')
-        : await getServerKnowledgeBases();
+      const stored = await getServerKnowledgeBases();
+      if (token !== getStoredSessionToken()) return;
       bases.value = normalizeAll(stored);
-    } catch {
+      savedBases = JSON.parse(JSON.stringify(bases.value));
+    } catch (error) {
       bases.value = [];
+      throw error;
     }
     // Soft-migrate: promote first Bailian per-base credentials into shared provider settings.
     const bailian = providerSettings.value.providers.find((item) => item.id === 'bailian');
@@ -355,8 +372,16 @@ export function useKnowledgeConfig() {
   };
 
   const persist = async () => {
-    if (window.workexpertDesktop) await writeStored(basesKey, JSON.stringify(bases.value));
-    else await saveServerKnowledgeBases(bases.value);
+    const token = getStoredSessionToken();
+    try {
+      const saved = await saveServerKnowledgeBases(bases.value);
+      if (token !== getStoredSessionToken()) return;
+      bases.value = normalizeAll(saved);
+      savedBases = JSON.parse(JSON.stringify(bases.value));
+    } catch (error) {
+      if (token === getStoredSessionToken()) bases.value = JSON.parse(JSON.stringify(savedBases));
+      throw error;
+    }
   };
 
   const enabledProviders = computed(() =>
@@ -400,14 +425,17 @@ export function useKnowledgeConfig() {
         }
       }
     }
+    const existing = bases.value.find((item) => item.id === id);
     const next: KnowledgeBase = {
       id,
       name,
       provider,
       enabled: input.enabled !== false,
       ontologyEnabled: input.ontologyEnabled !== false,
+      wikiRetrievalEnabled: input.wikiRetrievalEnabled === true,
+      wikiRelatedExpansionEnabled: input.wikiRelatedExpansionEnabled === true,
       description: String(input.description || '').trim(),
-      dataDir: String(input.dataDir || '').trim(),
+      dataDir: String(input.dataDir ?? existing?.dataDir ?? '').trim(),
       // Keep per-base overrides empty when using shared provider credentials.
       baseUrl: String(input.baseUrl || '').trim(),
       apiKey: String(input.apiKey || ''),
@@ -426,7 +454,6 @@ export function useKnowledgeConfig() {
       indexState: undefined,
       updatedAt: Date.now(),
     };
-    const existing = bases.value.find((item) => item.id === id);
     next.indexState = shouldMarkStale(existing, next)
       ? {
           status: 'stale',
@@ -441,7 +468,7 @@ export function useKnowledgeConfig() {
     else bases.value = [next, ...bases.value];
     bases.value = [...bases.value];
     await persist();
-    return next;
+    return bases.value.find((item) => item.id === id) ?? next;
   };
 
   const remove = async (id: string) => {

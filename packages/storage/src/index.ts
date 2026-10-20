@@ -1,4 +1,8 @@
-/** Storage contract. SQLite implementation is intentionally deferred until sessions are introduced. */
+export { KnowledgeEvidenceStore, KnowledgeEvidenceStoreError } from './knowledge-evidence-store.js';
+export { KnowledgeWikiStore, KnowledgeWikiError, type WikiSourceAuthorizer } from './knowledge-wiki-store.js';
+export { ImmutableFileStore, ImmutableFileError } from './immutable-file-store.js';
+export { KnowledgeSourceStore, KnowledgeSourceStoreError } from './knowledge-source-store.js';
+
 export interface KeyValueStore {
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T): Promise<void>;

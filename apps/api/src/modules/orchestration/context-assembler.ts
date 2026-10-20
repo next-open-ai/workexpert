@@ -1,7 +1,9 @@
 import type { ChatRunContext, KeyValueStore, ProjectTask } from '@workexpert/orchestrator';
 import { ProviderIdSchema, resolveProviderBaseUrl } from '@workexpert/contracts';
-import type { DecisionGuardPolicy, DecisionRuntimeConfig, ModelCapabilityRuntime } from '@workexpert/contracts';
+import type { ChatRequest, DecisionGuardPolicy, DecisionRuntimeConfig, ModelCapabilityRuntime } from '@workexpert/contracts';
 import { ensureModelSecrets } from './secrets.js';
+import { KnowledgeCatalog } from '../knowledge/catalog.js';
+import { localUserAuthService } from '../auth/service.js';
 
 /**
  * Server-side run-context assembly (M0).
@@ -24,7 +26,6 @@ const SKILLS_KEY = 'capabilities.skills.v2';
 const POLICIES_KEY = 'capabilities.employee-policies';
 const PREFS_KEY = 'workspace.employee-runtime-prefs';
 const MCP_KEY = 'capabilities.mcp';
-const KB_BASES_KEY = 'capabilities.knowledge';
 const KB_PROVIDERS_KEY = 'settings.knowledge-providers';
 
 const PROVIDER_IDS = new Set(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible']);
@@ -162,28 +163,16 @@ async function kvJson(store: KeyValueStore, key: string): Promise<unknown> {
 
 /**
  * Desktop stores prefs under `user:<id>:workspace.employee-runtime-prefs`.
- * Unscoped key is often empty; scan user-scoped keys as fallback.
+ * A known owner never inherits another user's or legacy global preferences.
  */
 async function readEmployeePrefsMap(
   store: KeyValueStore,
   ownerUserId?: string | null,
 ): Promise<Record<string, unknown>> {
-  const candidates: string[] = [];
-  if (ownerUserId?.trim()) candidates.push(`user:${ownerUserId.trim()}:${PREFS_KEY}`);
-  candidates.push(PREFS_KEY);
+  const candidates = ownerUserId?.trim() ? [`user:${ownerUserId.trim()}:${PREFS_KEY}`] : [PREFS_KEY];
   for (const key of candidates) {
     const raw = await kvJson(store, key);
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
-  }
-  try {
-    const keys = await store.keys('user:');
-    const prefKeys = keys.filter((key) => key.endsWith(`:${PREFS_KEY}`));
-    for (const key of prefKeys.reverse()) {
-      const raw = await kvJson(store, key);
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
-    }
-  } catch {
-    // ignore listing failures
   }
   return {};
 }
@@ -220,7 +209,7 @@ function profileFor(
     PRESET_DEFAULT_INSTRUCTIONS[employeeId] ||
     '按要求完成任务，不虚构执行结果。';
   const roleBrief = description ? ` Role brief: ${description}` : '';
-  const instructions = `${name}（QuantumAI 数字员工）。${roleBrief} ${focus}`.trim();
+  const instructions = `${name}（WorkExpert 数字员工）。${roleBrief} ${focus}`.trim();
   return { id: employeeId, name, instructions, toolIds: [] };
 }
 
@@ -347,21 +336,14 @@ async function mcpConnectionsFor(
   // credentials or tools into another. The previous implementation only read
   // the legacy unscoped key, which made MCP tests pass in the UI but left chat
   // runs with no connectors at all.
-  const scoped = ownerUserId?.trim() ? await kvJson(store, `user:${ownerUserId.trim()}:${MCP_KEY}`) : null;
-  const scopedRows = rows(scoped) as Array<Record<string, unknown>>;
-  const all = (scopedRows.length > 0 ? scopedRows : rows(await kvJson(store, MCP_KEY))) as Array<Record<string, unknown>>;
+  const all = rows(await kvJson(store, ownerUserId?.trim() ? `user:${ownerUserId.trim()}:${MCP_KEY}` : MCP_KEY));
   const wanted = new Set(prefs.mcpIds ?? []);
-  const AUTO_SKIP = new Set(['mcp-baseline-playwright', 'mcp-baseline-chrome-devtools']);
   const out: ChatRunContext['mcpConnections'] = [];
   for (const raw of all) {
     const id = String(raw.id ?? '');
     if (!id || raw.enabled === false) continue;
-    // Explicit association restricts; empty prefs → enabled connectors minus heavy browsers.
-    if (wanted.size > 0) {
-      if (!wanted.has(id)) continue;
-    } else if (AUTO_SKIP.has(id)) {
-      continue;
-    }
+    // An empty selection means no authorization, not automatic opt-in.
+    if (!wanted.has(id)) continue;
     // Prefer connectors that passed a probe when metadata is present.
     if (raw.lastTestStatus === 'failed') continue;
     const transport = raw.transport === 'sse' || raw.transport === 'http' || raw.transport === 'stdio' ? raw.transport : 'http';
@@ -394,19 +376,21 @@ async function mcpConnectionsFor(
   return out.slice(0, 12);
 }
 
-async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow, modelSettingsRaw: unknown): Promise<ChatRunContext['knowledgeBases']> {
+async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow, modelSettingsRaw: unknown, ownerUserId?: string | null): Promise<ChatRunContext['knowledgeBases']> {
   const provider = prefs.knowledgeProvider;
   if (!provider || provider === 'off') return [];
   const modelSettings = (modelSettingsRaw && typeof modelSettingsRaw === 'object' ? modelSettingsRaw : {}) as ModelSettings;
   const configuredModels = Array.isArray(modelSettings.models) ? modelSettings.models : [];
   const providerInstances = Array.isArray(modelSettings.providerInstances) ? modelSettings.providerInstances : [];
-  const bases = rows(await kvJson(store, KB_BASES_KEY)) as Array<Record<string, unknown>>;
+  const owner = ownerUserId ? localUserAuthService().listUsers().find((user) => user.id === ownerUserId && !user.disabled) : undefined;
+  if (!owner) return [];
+  const bases = new KnowledgeCatalog().list({ orgId: owner.orgId, userId: owner.id });
   const providersRaw = rows(await kvJson(store, KB_PROVIDERS_KEY)) as Array<Record<string, unknown>>;
   const wanted = new Set(prefs.knowledgeBaseIds ?? []);
   const out: ChatRunContext['knowledgeBases'] = [];
   for (const raw of bases) {
     const id = String(raw.id ?? '');
-    if (!id || String(raw.provider ?? '') !== provider) continue;
+    if (!id || raw.enabled === false || String(raw.provider ?? '') !== provider) continue;
     if (wanted.size > 0 && !wanted.has(id)) continue;
     const providerRow = providersRaw.find((item) => String(item.id ?? '') === provider || String(item.provider ?? '') === provider);
     const apiKey = raw.apiKey ? String(raw.apiKey) : providerRow?.apiKey ? String(providerRow.apiKey) : undefined;
@@ -449,7 +433,7 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow, modelSet
 }
 
 /**
- * MCP connectors for an employee (prefs association, or auto-default when empty).
+ * MCP connectors explicitly associated with this employee; empty means none.
  * Independent of model resolution so chat can backfill tools even when the
  * client already supplied the model.
  */
@@ -461,6 +445,15 @@ export async function resolveEmployeeMcpConnections(
   const prefsAll = await readEmployeePrefsMap(store, ownerUserId);
   const prefs = (prefsAll[employeeId] ?? {}) as PrefsRow;
   return mcpConnectionsFor(store, prefs, ownerUserId);
+}
+
+/** Recompute at execution time; client payloads and old run snapshots grant no MCP access. */
+export async function authorizeRunMcp<T extends Pick<ChatRequest, 'profile' | 'mcpConnections'>>(
+  store: KeyValueStore, request: T, ownerUserId?: string | null,
+): Promise<T> {
+  return { ...request, mcpConnections: ownerUserId?.trim()
+    ? await resolveEmployeeMcpConnections(store, request.profile.id, ownerUserId)
+    : [] };
 }
 
 /**
@@ -503,7 +496,7 @@ export async function resolveTaskContext(
     skills: await skillRuntimeFor(store, task, tier),
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
     mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
-    knowledgeBases: await knowledgeBasesFor(store, prefs, secrets.model),
+    knowledgeBases: await knowledgeBasesFor(store, prefs, secrets.model, ownerUserId),
     modelCapabilities: modelCapabilitiesFor(task.employeeId, secrets.model, prefs.useApplicationModels !== false),
     ...(decisionRuntimeFor(secrets.model) ? { decisionRuntime: decisionRuntimeFor(secrets.model) } : {}),
     maxSteps,

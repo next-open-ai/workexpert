@@ -20,6 +20,7 @@ import {
   type AuthUser,
 } from '../services/auth.js';
 import { setStorageNamespace } from './storage.js';
+import { resetKnowledgeConfig } from './kb-config.js';
 
 const currentUser = ref<AuthUser | null>(null);
 const ready = ref(false);
@@ -30,6 +31,7 @@ const mySessions = ref<AuthSessionInfo[]>([]);
 const currentSessionId = ref<string | null>(null);
 
 function applyUser(user: AuthUser | null) {
+  if (currentUser.value?.id !== user?.id || currentUser.value?.orgId !== user?.orgId) resetKnowledgeConfig();
   currentUser.value = user;
   setStorageNamespace(user ? `user:${user.id}` : null);
   if (!user) {

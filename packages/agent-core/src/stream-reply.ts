@@ -11,6 +11,7 @@ import {
 import { loadExecutionRoutingConfig } from './execution-routing-config.js';
 import { attachBuiltinSkillPackages } from './builtin-skill-packages.js';
 import { assertVisionSupported } from './image-input.js';
+import { WORKEXPERT_IDENTITY } from './runtime-identity.js';
 
 export { DEFAULT_RUN_TIMEOUT_MS };
 export {
@@ -53,6 +54,7 @@ export async function* streamAgentReply(
 ): AsyncGenerator<AgentEvent> {
   const preparedInput: ExecutionBackendStreamInput = {
     ...input,
+    profile: { ...input.profile, instructions: `${input.profile.instructions}\n\n${WORKEXPERT_IDENTITY}` },
     skills: await attachBuiltinSkillPackages(input.skills ?? []),
   };
   const stored = loadExecutionRoutingConfig();

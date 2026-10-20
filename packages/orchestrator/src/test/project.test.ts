@@ -218,6 +218,20 @@ test('server-side context resolver runs tasks when confirm carries no context', 
   }
 });
 
+test('WK-A03: project context resolution receives the persisted owner, not a task-supplied identity', async () => {
+  const owners: Array<string | undefined> = [];
+  const orch = new Orchestrator({ store: new MemoryStore(), runner: new FakeRunner(),
+    contextResolver: async (_task, ownerUserId) => { owners.push(ownerUserId); return runContext(); } });
+  try {
+    const project = await orch.projects.createDraft({ goal: 'Owned context', mode: 'parallel', orgId: 'org', ownerUserId: 'alice', workspacePath: '/tmp/workexpert-test-owner',
+      coordinator: { provider: 'ollama', model: 'fake-model' },
+      tasks: [{ title: 'Owned task', objective: 'test', employeeId: 'general', skillIds: [] }] });
+    await orch.projects.confirmProject(project.id, {});
+    await waitFor(async () => (await orch.projects.getProject(project.id))?.status === 'completed');
+    assert.deepEqual(owners, ['alice']);
+  } finally { await orch.close(); }
+});
+
 test('cancel aborts queued work and finishes as cancelled', async () => {
   const fake = new FakeRunner({ texts: () => 'slow', delayMs: 300 });
   const orch = Orchestrator.memory({ runner: fake });

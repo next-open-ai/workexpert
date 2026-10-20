@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { MAX_LOCAL_KNOWLEDGE_FILE_BYTES, MAX_BAILIAN_KNOWLEDGE_FILE_BYTES, MAX_KNOWLEDGE_TEXT_CHARS } from '@workexpert/contracts';
 import { useI18n } from '../../app/i18n';
 import {
   knowledgeProviderIds,
@@ -11,6 +12,7 @@ import {
 import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById, toModelPayload, useModelConfig } from '../../app/model-config';
 import { useNotify } from '../../app/notify';
 import OntologyWorkbench from './OntologyWorkbench.vue';
+import WikiWorkbench from './WikiWorkbench.vue';
 import {
   deleteKnowledgeChunk,
   deleteKnowledgeDocument,
@@ -36,12 +38,18 @@ const notify = useNotify();
 const { bases, load, upsert, remove, setEnabled, setDocumentCount, setIndexState, isReady, enabledProviders, isProviderEnabled, providerDefaults, resolveCredentials } = useKnowledgeConfig();
 const { activeConfig, configured, settings: modelSettings, load: loadModels } = useModelConfig();
 
-type DetailTab = 'documents' | 'chunks' | 'search' | 'ontology' | 'settings';
+type DetailTab = 'documents' | 'chunks' | 'search' | 'ontology' | 'wiki' | 'settings';
 type ProviderFilter = 'all' | KnowledgeProviderId;
 
 const providerFilter = ref<ProviderFilter>('all');
 const selectedId = ref<string | null>(null);
 const detailTab = ref<DetailTab>('documents');
+async function openWiki(id: string) {
+  selectedId.value = id;
+  // Let the existing selection watcher initialize the library before choosing its Wiki tab.
+  await nextTick();
+  if (selectedId.value === id) detailTab.value = 'wiki';
+}
 const formOpen = ref(false);
 const editingId = ref<string | null>(null);
 const saving = ref(false);
@@ -63,19 +71,63 @@ const chunkQuery = ref('');
 const chunkDocumentId = ref('');
 const searchQuery = ref('');
 const searching = ref(false);
-const searchStrategy = ref<'vector-only' | 'ontology-enhanced' | null>(null);
+const searchError = ref('');
+const searchValidation = ref('');
+const searchStrategy = ref<'vector-only' | 'hybrid' | 'ontology-enhanced' | null>(null);
 const documents = ref<KnowledgeDocumentRow[]>([]);
 const chunks = ref<KnowledgeChunkRow[]>([]);
 const chunkTotal = ref(0);
 const docStats = ref({ documentCount: 0, chunkCount: 0, backend: '' });
-const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>>([]);
+const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string; wiki?: import('@workexpert/contracts').WikiRecall; retrieval?: import('@workexpert/contracts').KnowledgeRetrieval; context?: import('@workexpert/contracts').KnowledgeParentContext; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>>([]);
 const selectedChunk = ref<KnowledgeChunkRow | null>(null);
+const wikiPageId = ref<string>();
+watch(selectedId, () => { wikiPageId.value = undefined; });
+function openWikiResult(pageId: string) { wikiPageId.value = pageId; detailTab.value = 'wiki'; }
+let searchRequestId = 0;
+
+function invalidateSearch() {
+  searchRequestId += 1;
+  searching.value = false;
+  searchHits.value = [];
+  searchStrategy.value = null;
+  searchError.value = '';
+  searchValidation.value = '';
+}
+
+// Synchronous invalidation also covers A → list → A before an old response arrives.
+watch([selectedId, searchQuery], invalidateSearch, { flush: 'sync' });
+onBeforeUnmount(invalidateSearch);
+
+const searchSummary = computed(() => {
+  const hits = searchHits.value;
+  const degraded = hits.some(hit => hit.retrieval?.degraded);
+  const channels = new Set(hits.flatMap(hit => hit.retrieval?.channels ?? []));
+  const sources = channels.has('keyword') && channels.has('vector') ? '关键词与语义'
+    : channels.has('keyword') ? '关键词' : channels.has('vector') ? '语义' : '';
+  const wikiMatched = hits.some(hit => hit.wiki);
+  const ontologyMatched = hits.some(hit => hit.retrievalRoutes?.some(route => route !== 'raw-vector'));
+  return {
+    title: degraded ? '本次使用降级检索' : !hits.length ? '未找到匹配结果'
+      : wikiMatched ? '本次结果包含 Wiki 融合召回'
+      : ontologyMatched ? '本次结果包含本体增强匹配'
+      : sources ? `本次匹配来自${sources}检索` : '本次检索已完成',
+    description: (degraded ? '语义检索未完整参与，已返回可用的匹配结果。'
+      : !hits.length ? '可调整关键词后再次检索。'
+      : wikiMatched ? ''
+      : ontologyMatched ? '命中了本体扩展或图谱证据，可展开检索详情查看。'
+      : sources ? '显示实际命中的来源，不代表其他检索通道未运行。'
+      : '以下为当前知识库返回的匹配结果。')
+      + (wikiMatched ? 'Wiki 是带原文引用的整理内容，不作为与原文相互独立的证据；可打开页面核对来源。' : ''),
+  };
+});
 
 const draft = ref({
   name: '',
   provider: 'lancedb' as KnowledgeProviderId,
   enabled: true,
   ontologyEnabled: true,
+  wikiRetrievalEnabled: false,
+  wikiRelatedExpansionEnabled: false,
   description: '',
   baseUrl: '',
   apiKey: '',
@@ -124,10 +176,10 @@ const embeddingModels = computed(() => modelSettings.value.models
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
   supportsManage.value
-    ? ['documents', 'ontology', 'search', 'chunks', 'settings']
+    ? ['documents', ...(selected.value?.provider === 'lancedb' ? ['wiki' as const] : []), 'ontology', 'search', 'chunks', 'settings']
     : ['search', 'settings']
 ));
-const primaryDetailTabs = computed(() => detailTabs.value.filter((tab) => ['documents', 'ontology', 'search'].includes(tab)));
+const primaryDetailTabs = computed(() => detailTabs.value.filter((tab) => ['documents', 'wiki', 'ontology', 'search'].includes(tab)));
 const advancedDetailTabs = computed(() => detailTabs.value.filter((tab) => ['chunks', 'settings'].includes(tab)));
 const ingestFileBase64 = ref('');
 const ingestFileName = ref('');
@@ -149,7 +201,8 @@ const ingestProgress = computed(() => ({
 }[ingestStage.value]));
 
 onMounted(async () => {
-  await Promise.all([load(), loadModels()]);
+  try { await Promise.all([load(), loadModels()]); }
+  catch (cause) { notify.error(cause, 'notify.loadFailed'); }
 });
 
 watch(selectedId, async (id) => {
@@ -185,6 +238,9 @@ function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
     name: item.name,
     provider: item.provider,
     enabled: item.enabled,
+    ontologyEnabled: item.ontologyEnabled,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled,
+    wikiRelatedExpansionEnabled: item.wikiRelatedExpansionEnabled,
     description: item.description || undefined,
     dataDir: item.dataDir || undefined,
     baseUrl: creds.baseUrl,
@@ -206,19 +262,10 @@ function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
 
 function indexStatusLabel(item: KnowledgeBase) {
   switch (item.indexState?.status) {
-    case 'stale': return 'Stale';
-    case 'rebuilding': return 'Rebuilding';
-    case 'ready': return 'Ready';
-    default: return '';
-  }
-}
-
-function indexStatusClass(item: KnowledgeBase) {
-  switch (item.indexState?.status) {
-    case 'stale': return 'bg-amber-500/15 text-amber-700';
-    case 'rebuilding': return 'bg-sky-500/15 text-sky-700';
-    case 'ready': return 'bg-emerald-500/15 text-emerald-700';
-    default: return 'bg-[var(--surface-muted)] text-[var(--muted)]';
+    case 'stale': return '待重建';
+    case 'rebuilding': return '重建中';
+    case 'ready': return '已就绪';
+    default: return '未报告';
   }
 }
 
@@ -236,6 +283,8 @@ function resetDraft() {
     provider: 'lancedb',
     enabled: true,
     ontologyEnabled: true,
+    wikiRetrievalEnabled: false,
+    wikiRelatedExpansionEnabled: false,
     description: '',
     baseUrl: '',
     apiKey: '',
@@ -283,6 +332,8 @@ function openEdit(item: KnowledgeBase) {
     provider: item.provider,
     enabled: item.enabled,
     ontologyEnabled: item.ontologyEnabled !== false,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled === true,
+    wikiRelatedExpansionEnabled: item.wikiRelatedExpansionEnabled === true,
     description: item.description || '',
     baseUrl: item.baseUrl || '',
     apiKey: item.apiKey || '',
@@ -322,6 +373,8 @@ async function save() {
       provider: draft.value.provider,
       enabled: draft.value.enabled,
       ontologyEnabled: draft.value.ontologyEnabled,
+      wikiRetrievalEnabled: draft.value.provider === 'lancedb' && draft.value.wikiRetrievalEnabled,
+      wikiRelatedExpansionEnabled: draft.value.provider === 'lancedb' && draft.value.wikiRelatedExpansionEnabled,
       description: draft.value.description,
       baseUrl: draft.value.baseUrl,
       apiKey: draft.value.apiKey,
@@ -341,6 +394,7 @@ async function save() {
         : 0,
     });
     selectedId.value = saved.id;
+    invalidateSearch();
     notify.success(editingId.value ? 'notify.kbUpdated' : 'notify.kbCreated');
     closeForm();
   } catch (cause) {
@@ -359,7 +413,7 @@ async function onToggle(item: KnowledgeBase, event: Event) {
 }
 
 async function onDeleteBase(item: KnowledgeBase) {
-  if (!window.confirm(t('knowledge.deleteConfirm', { name: item.name }))) return;
+  if (!window.confirm(t('knowledge.deleteConfirm', { name: item.name }) + (item.provider === 'lancedb' ? '\n\n' + t('knowledge.sourceRetentionNotice') : ''))) return;
   try {
     await remove(item.id);
     if (selectedId.value === item.id) selectedId.value = null;
@@ -473,10 +527,11 @@ function fileToBase64(file: File) {
 async function prepareIngestFile(file?: File) {
   if (!file) return;
   ingestMode.value = 'file';
+  resetIngestFile();
   ingestStage.value = 'reading';
   ingestError.value = '';
   ingestResult.value = '';
-  const maxBytes = selected.value?.provider === 'bailian' ? 8_000_000 : 2_000_000;
+  const maxBytes = selected.value?.provider === 'bailian' ? MAX_BAILIAN_KNOWLEDGE_FILE_BYTES : MAX_LOCAL_KNOWLEDGE_FILE_BYTES;
   if (file.size > maxBytes) {
     ingestStage.value = 'error';
     ingestError.value = t('knowledge.fileTooLarge');
@@ -495,6 +550,7 @@ async function prepareIngestFile(file?: File) {
       ingestContent.value = '';
     } else {
       const textContent = await file.text();
+      if (textContent.length > MAX_KNOWLEDGE_TEXT_CHARS) throw new Error(t('knowledge.textTooLarge'));
       ingestContent.value = textContent;
       ingestFileBase64.value = selected.value?.provider === 'bailian' ? await fileToBase64(file) : '';
     }
@@ -546,6 +602,11 @@ async function runIngest() {
     ingestError.value = t('knowledge.contentRequired');
     return;
   }
+  if (ingestContent.value.length > MAX_KNOWLEDGE_TEXT_CHARS) {
+    ingestStage.value = 'error';
+    ingestError.value = t('knowledge.textTooLarge');
+    return;
+  }
   ingestBusy.value = true;
   ingestStage.value = 'processing';
   ingestError.value = '';
@@ -554,7 +615,7 @@ async function runIngest() {
     const result = await ingestKnowledgeDocument({
       knowledgeBase: toPayload(selected.value),
       title: ingestTitle.value.trim() || 'document',
-      content: ingestContent.value.trim() || undefined,
+      content: ingestContent.value.trim() ? ingestContent.value : undefined,
       fileBase64: ingestFileBase64.value.trim() || undefined,
       fileName: ingestFileName.value.trim() || undefined,
       source: ingestSource.value.trim() || undefined,
@@ -573,7 +634,8 @@ async function runIngest() {
     ingestStage.value = 'success';
     ingestResult.value = result.jobId
       ? `文件已上传，云端任务 ${result.jobId} 正在处理。`
-      : `导入完成，已生成 ${result.chunks || 0} 个知识分片并写入索引。`;
+      : t('knowledge.ingestSearchReady', { count: result.chunks || 0 });
+    if (result.sourceSnapshot) ingestResult.value += ` ${t('knowledge.sourceArchived')}`;
     detailTab.value = 'documents';
     await refreshDetail();
   } catch (cause) {
@@ -616,7 +678,7 @@ async function pollBailianJob(jobId: string) {
 
 async function removeDocument(doc: KnowledgeDocumentRow) {
   if (!selected.value) return;
-  if (!window.confirm(t('knowledge.deleteDocConfirm', { name: doc.title }))) return;
+  if (!window.confirm(t('knowledge.deleteDocConfirm', { name: doc.title }) + (selected.value?.provider === 'lancedb' ? '\n\n' + t('knowledge.sourceRetentionNotice') : ''))) return;
   try {
     const result = await deleteKnowledgeDocument({
       knowledgeBase: toPayload(selected.value),
@@ -746,35 +808,53 @@ async function createBailianRemote() {
 }
 
 async function runSearch() {
-  if (!selected.value || searchQuery.value.trim().length < 2) return;
+  if (!selected.value || searching.value) return;
+  if (searchQuery.value.trim().length < 2) {
+    searchValidation.value = '请输入至少 2 个字符的问题或关键词。';
+    return;
+  }
+  searchValidation.value = '';
+  searchError.value = '';
+  const base = selected.value;
+  const query = searchQuery.value.trim();
+  const requestId = ++searchRequestId;
+  const isCurrent = () => requestId === searchRequestId && selectedId.value === base.id;
   searching.value = true;
   searchStrategy.value = null;
+  searchHits.value = [];
   try {
     const input = {
-      knowledgeBase: toPayload(selected.value),
-      query: searchQuery.value.trim(),
+      knowledgeBase: toPayload(base),
+      query,
       topK: 6,
       model: configured.value ? toModelPayload(activeConfig.value) : undefined,
     };
-    const result = selected.value.ontologyEnabled !== false
+    const result = base.ontologyEnabled !== false
       ? await searchKnowledgeWithOntology(input)
       : await searchKnowledge(input);
+    if (!isCurrent()) return;
     searchHits.value = result.results;
     searchStrategy.value = 'strategy' in result && result.strategy === 'ontology-enhanced'
       ? 'ontology-enhanced'
-      : 'vector-only';
+      : base.provider === 'lancedb' ? 'hybrid' : 'vector-only';
   } catch (cause) {
-    notify.error(cause, 'notify.saveFailed');
+    if (isCurrent()) {
+      searchError.value = '检索暂未完成，请检查知识库设置或稍后重试。';
+      notify.error(cause, 'knowledge.searchFailed');
+    }
   } finally {
-    searching.value = false;
+    if (isCurrent()) searching.value = false;
   }
 }
 
 function detailTabLabel(tab: DetailTab) {
+  if (tab === 'wiki') return 'Wiki';
+  if (tab === 'settings') return '技术信息';
   return t(`knowledge.tab.${tab}`);
 }
 
 function detailTabDescription(tab: DetailTab) {
+  if (tab === 'wiki') return '整理主题、核对来源与阅读互链';
   if (tab === 'documents') return '管理原始资料与可检索内容';
   if (tab === 'ontology') return '建模实体、关系与业务逻辑';
   if (tab === 'search') return '验证真实问题的召回质量';
@@ -782,6 +862,7 @@ function detailTabDescription(tab: DetailTab) {
 }
 
 function detailTabMark(tab: DetailTab) {
+  if (tab === 'wiki') return 'W';
   if (tab === 'documents') return '文';
   if (tab === 'ontology') return '本';
   if (tab === 'search') return '验';
@@ -789,9 +870,9 @@ function detailTabMark(tab: DetailTab) {
 }
 
 function retrievalRouteLabel(route: 'raw-vector' | 'ontology-vector' | 'ontology-evidence') {
-  if (route === 'ontology-evidence') return t('knowledge.route.evidence');
-  if (route === 'ontology-vector') return t('knowledge.route.ontology');
-  return t('knowledge.route.vector');
+  if (route === 'ontology-evidence') return '本体证据';
+  if (route === 'ontology-vector') return '本体扩展查询';
+  return '原始查询';
 }
 
 function summaryLine(item: KnowledgeBase) {
@@ -883,10 +964,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
                 <div class="flex flex-wrap items-center gap-2">
                   <h2 class="truncate text-base font-bold">{{ item.name }}</h2>
                   <span :class="['rounded-full px-2 py-0.5 text-[10px] font-bold', isReady(item) ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'bg-[var(--surface-muted)] text-[var(--muted)]']">
-                    {{ isReady(item) ? t('knowledge.ready') : t('knowledge.notReady') }}
-                  </span>
-                  <span v-if="item.indexState?.status" :class="['rounded-full px-2 py-0.5 text-[10px] font-bold', indexStatusClass(item)]">
-                    {{ indexStatusLabel(item) }}
+                    {{ isReady(item) ? '配置就绪' : '待配置' }}
                   </span>
                 </div>
                 <p class="mt-1 text-xs text-[var(--muted)]">{{ meta(item.provider).label }}</p>
@@ -899,14 +977,16 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             <p class="mt-3 line-clamp-2 text-sm text-[var(--muted)]">{{ item.description || summaryLine(item) }}</p>
             <dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-[var(--border)] py-4 text-xs sm:grid-cols-4">
               <div><dt class="text-[var(--muted)]">知识内容</dt><dd class="mt-1 font-semibold">{{ item.documentCount || 0 }} 篇文档</dd></div>
-              <div><dt class="text-[var(--muted)]">知识图谱</dt><dd class="mt-1 font-semibold">{{ item.ontologyEnabled === false ? '未启用' : '本体增强' }}</dd></div>
-              <div><dt class="text-[var(--muted)]">召回方式</dt><dd class="mt-1 font-semibold">{{ item.ontologyEnabled === false ? '向量检索' : '混合召回' }}</dd></div>
+              <div><dt class="text-[var(--muted)]">本体增强</dt><dd class="mt-1 font-semibold">{{ item.ontologyEnabled === false ? '已关闭' : '已开启' }}</dd></div>
+              <div v-if="item.provider === 'lancedb'"><dt class="text-[var(--muted)]">Wiki 融合</dt><dd class="mt-1 font-semibold">{{ item.wikiRetrievalEnabled ? '已开启' : '已关闭' }}</dd></div>
+              <div v-else><dt class="text-[var(--muted)]">检索来源</dt><dd class="mt-1 font-semibold">外部知识库</dd></div>
               <div><dt class="text-[var(--muted)]">索引状态</dt><dd class="mt-1 font-semibold">{{ indexStatusLabel(item) }}</dd></div>
             </dl>
             <p v-if="item.provider === 'lancedb' || item.provider === 'qdrant' || item.provider === 'pinecone'" class="mt-3 truncate text-[11px] text-[var(--muted)]">向量模型：{{ embeddingSourceSummary(item) }}</p>
             <div class="mt-5 flex flex-wrap gap-2">
               <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="selectedId = item.id">管理知识</button>
-              <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(item)">{{ t('knowledge.edit') }}</button>
+              <button v-if="item.provider === 'lancedb'" type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openWiki(item.id)">打开 Wiki</button>
+              <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(item)">知识库设置</button>
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--muted)]" @click="onDeleteBase(item)">{{ t('knowledge.delete') }}</button>
             </div>
           </article>
@@ -920,7 +1000,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                 <h2 class="truncate text-lg font-bold tracking-[-.02em]">{{ selected.name }}</h2>
                 <span class="rounded-md bg-[var(--surface-muted)] px-2 py-1 text-[10px] font-bold uppercase tracking-[.1em] text-[var(--muted)]">{{ meta(selected.provider).label }}</span>
-                <span :class="['rounded-md px-2 py-1 text-[10px] font-semibold', isReady(selected) ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700']">{{ isReady(selected) ? '索引就绪' : indexStatusLabel(selected) }}</span>
+                <span class="rounded-md bg-[var(--surface-muted)] px-2 py-1 text-[10px] font-semibold">{{ selected.indexState?.status ? `索引${indexStatusLabel(selected)}` : isReady(selected) ? '配置就绪 · 索引状态未报告' : '待配置' }}</span>
               </div>
               <div class="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[var(--muted)]">
                 <span v-if="supportsManage">{{ docStats.documentCount }} 篇文档 · {{ docStats.chunkCount }} 个分片</span>
@@ -930,11 +1010,11 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             </div>
             <div class="flex flex-wrap gap-2">
               <button v-if="supportsManage" type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="openIngest">{{ t('knowledge.upload') }}</button>
-              <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(selected)">{{ t('knowledge.edit') }}</button>
+              <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(selected)">知识库设置</button>
             </div>
           </div>
           <nav class="border-t border-[var(--border)] bg-[var(--surface-muted)]/35 p-2.5" aria-label="知识库工作区">
-            <div class="grid gap-2 md:grid-cols-3">
+            <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
             <button
               v-for="tab in primaryDetailTabs"
               :key="tab"
@@ -948,7 +1028,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             </button>
             </div>
             <div v-if="advancedDetailTabs.length" class="mt-2 flex flex-wrap items-center justify-end gap-1.5 px-1">
-              <span class="mr-1 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--muted)]">数据与设置</span>
+              <span class="mr-1 text-[10px] font-semibold text-[var(--muted)]">高级工具</span>
               <button v-for="tab in advancedDetailTabs" :key="tab" type="button" :class="['rounded-md px-2.5 py-1.5 text-[11px] font-medium', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']" @click="detailTab = tab">{{ detailTabLabel(tab) }}</button>
             </div>
           </nav>
@@ -1017,6 +1097,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
                 <button type="button" class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)]" @click="removeChunk(selectedChunk)">{{ t('knowledge.removeChunk') }}</button>
               </div>
               <pre class="mt-4 max-h-[560px] overflow-auto whitespace-pre-wrap rounded-xl bg-[var(--surface-muted)] p-4 text-sm leading-relaxed">{{ selectedChunk.content }}</pre>
+              <p v-if="selectedChunk.evidence?.verification === 'versioned' && selectedChunk.evidence.sourceLocation" class="mt-2 text-xs text-[var(--muted)]">{{ t('knowledge.parsedLocation', { start: selectedChunk.evidence.sourceLocation.start, end: selectedChunk.evidence.sourceLocation.end }) }}</p>
             </template>
             <p v-else class="py-16 text-center text-sm text-[var(--muted)]">{{ t('knowledge.pickChunk') }}</p>
           </div>
@@ -1025,33 +1106,63 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
         <article v-if="detailTab === 'search'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div><h3 class="text-base font-bold">{{ t('knowledge.searchTitle') }}</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.searchHelp') }}</p></div>
-            <span class="rounded-lg bg-[var(--accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--accent)]">{{ selected.ontologyEnabled === false ? '向量检索' : '向量 + 本体 + 图谱证据' }}</span>
+            <details class="max-w-full text-xs text-[var(--muted)]">
+              <summary class="cursor-pointer rounded px-2 py-1 font-semibold focus-visible:outline-2 focus-visible:outline-[var(--accent)]">检索设置</summary>
+              <div class="mt-2 space-y-1 rounded-lg bg-[var(--surface-muted)] p-3">
+                <p>{{ isLocal ? '关键词 + 语义' : '外部知识库检索' }}</p>
+                <p>本体增强：{{ selected.ontologyEnabled === false ? '已关闭' : '已开启' }}</p>
+                <p v-if="isLocal">Wiki 融合：{{ selected.wikiRetrievalEnabled ? '已开启' : '已关闭' }}</p>
+                <p>开启不代表本次命中，需有可用的已发布内容。</p>
+              </div>
+            </details>
           </div>
           <div class="mt-4 flex flex-wrap gap-2">
-            <input v-model="searchQuery" class="min-w-[240px] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" :placeholder="t('knowledge.searchPlaceholder')" @keydown.enter.prevent="runSearch" />
+            <label for="knowledge-search-query" class="sr-only">检索问题或关键词</label>
+            <input id="knowledge-search-query" v-model="searchQuery" name="knowledge-query" aria-describedby="knowledge-search-feedback" :aria-invalid="Boolean(searchValidation)" class="min-w-0 w-full flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm focus-visible:outline-2 focus-visible:outline-[var(--accent)]" :placeholder="t('knowledge.searchPlaceholder')" @keydown.enter.prevent="runSearch" />
             <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2.5 text-xs font-semibold text-white" :disabled="searching" @click="runSearch">{{ searching ? t('knowledge.searching') : t('knowledge.runSearch') }}</button>
           </div>
-          <div v-if="searchStrategy" class="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 px-4 py-3 text-sm">
-            <strong>{{ searchStrategy === 'ontology-enhanced' ? '本次已使用本体增强召回' : '本次使用普通向量召回' }}</strong>
-            <p class="mt-1 text-xs text-[var(--muted)]">{{ searchStrategy === 'ontology-enhanced' ? '结果融合了原始向量、本体扩展词和图谱证据。' : '没有命中可用的正式本体，系统已自动使用向量检索。' }}</p>
+          <div id="knowledge-search-feedback" role="status" aria-live="polite" aria-atomic="true" class="mt-4 text-sm">
+            <p v-if="searchValidation" class="text-amber-700">{{ searchValidation }}</p>
+            <p v-else-if="searching" class="text-[var(--muted)]">正在检索，请稍候…</p>
+            <p v-else-if="searchError" class="text-rose-600">{{ searchError }}</p>
+            <div v-else-if="searchStrategy" class="rounded-xl bg-[var(--surface-muted)]/45 px-4 py-3">
+              <strong>{{ searchSummary.title }}</strong>
+              <p class="mt-1 text-xs text-[var(--muted)]">{{ searchSummary.description }}</p>
+            </div>
+            <p v-else class="text-[var(--muted)]">输入实际问题或关键词，检查能否找到需要的内容。</p>
           </div>
           <ul class="mt-5 space-y-3">
-            <li v-for="hit in searchHits" :key="hit.id" class="rounded-xl border border-[var(--border)] px-4 py-3">
+            <li v-for="hit in searchHits" :key="`${hit.wiki ? 'wiki' : 'chunk'}:${hit.id}`" class="rounded-xl border border-[var(--border)] px-4 py-3">
               <div class="flex items-center justify-between gap-3">
-                <p class="font-semibold">{{ hit.title }}</p>
-                <span class="text-[11px] text-[var(--muted)]">{{ (hit.score * 100).toFixed(1) }}%</span>
+                <p class="min-w-0 break-words font-semibold">{{ hit.title }}</p>
+                <span class="shrink-0 rounded bg-[var(--surface-muted)] px-2 py-1 text-xs text-[var(--muted)]">{{ hit.wiki ? 'Wiki 整理' : '原文片段' }}</span>
               </div>
-              <div v-if="hit.retrievalRoutes?.length" class="mt-2 flex flex-wrap gap-1.5"><span v-for="route in hit.retrievalRoutes" :key="route" class="rounded-md bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-semibold text-[var(--accent)]">{{ retrievalRouteLabel(route) }}</span></div>
-              <p class="mt-2 text-sm leading-relaxed text-[var(--muted)]">{{ hit.content }}</p>
+              <p class="mt-2 break-words text-sm leading-relaxed text-[var(--muted)]">{{ hit.content }}</p>
+              <div v-if="hit.wiki" class="mt-2 text-xs"><button type="button" class="rounded text-[var(--accent)] underline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" @click="openWikiResult(hit.wiki.pageId)">查看 Wiki 与来源</button></div>
+              <details class="mt-3 text-xs text-[var(--muted)]">
+                <summary class="cursor-pointer rounded font-semibold focus-visible:outline-2 focus-visible:outline-[var(--accent)]">检索详情</summary>
+                <div class="mt-2 space-y-1 rounded-lg bg-[var(--surface-muted)] p-3">
+                  <p>排序分 {{ hit.score.toFixed(3) }} · 仅用于排序，不代表准确率</p>
+                  <p v-if="hit.wiki?.expansion">召回方式：Wiki 一跳关联扩展（经问题关键词相关性筛选）</p>
+                  <p v-if="hit.wiki">来源：已发布 Wiki 页面</p>
+                  <p v-else-if="hit.retrieval?.channels.length">命中方式：{{ hit.retrieval.channels.map(channel => channel === 'keyword' ? '关键词' : '语义').join('、') }}</p>
+                  <p v-if="hit.retrievalRoutes?.length">增强路径：{{ hit.retrievalRoutes.map(retrievalRouteLabel).join('、') }}</p>
+                </div>
+              </details>
+              <details v-if="hit.context" class="mt-3 text-sm text-[var(--muted)]">
+                <summary class="cursor-pointer text-xs font-semibold">{{ t('knowledge.viewContext') }}</summary>
+                <pre class="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-[var(--surface-muted)] p-3 text-sm leading-relaxed">{{ hit.context.content }}</pre>
+              </details>
             </li>
           </ul>
-          <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
 
         <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" @open-evidence="openOntologyEvidence" />
+        <WikiWorkbench v-if="detailTab === 'wiki' && selected" :key="selected.id" :knowledge-base="toPayload(selected)" :initial-page-id="wikiPageId" :model="configured ? toModelPayload(activeConfig) : undefined" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-          <h3 class="text-base font-bold">{{ t('knowledge.settingsTitle') }}</h3>
+          <h3 class="text-base font-bold">技术信息</h3>
+          <p class="mt-1 text-xs text-[var(--muted)]">用于排查连接与索引问题；修改模型或检索增强，请使用上方“知识库设置”。</p>
           <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-2">
             <div class="rounded-xl bg-[var(--surface-muted)] px-4 py-3">
               <dt class="text-[11px] font-bold uppercase tracking-wide text-[var(--muted)]">Provider</dt>
@@ -1099,7 +1210,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
 
     <div v-if="formOpen" class="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="presentation">
       <form class="max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="knowledge-form-title" @submit.prevent="save">
-        <h3 id="knowledge-form-title" class="text-lg font-bold">{{ editingId ? t('knowledge.edit') : t('knowledge.add') }}</h3>
+        <h3 id="knowledge-form-title" class="text-lg font-bold">{{ editingId ? '知识库设置' : t('knowledge.add') }}</h3>
         <p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.formHelp') }}</p>
         <div class="mt-4 grid gap-3">
           <label class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.name') }}<input v-model="draft.name" required class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal text-[var(--text)]" /></label>
@@ -1162,7 +1273,16 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             <p v-if="!embeddingModels.length" class="rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-[11px] font-normal text-[var(--muted)]">当前没有可用的 Embedding 模型。<button type="button" class="ml-1 font-semibold text-[var(--accent)]" @click="emit('openSettings')">前往设置</button></p>
           </div>
           <div class="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-3">
+            <p class="text-xs font-semibold">使用与检索增强</p>
             <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
+            <label v-if="draft.provider === 'lancedb'" class="flex items-start gap-2 text-xs font-semibold">
+              <input v-model="draft.wikiRetrievalEnabled" class="mt-0.5" type="checkbox" aria-label="启用 Wiki 融合检索" />
+              <span><strong class="block">启用 Wiki 融合检索</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">默认关闭。将已发布且来源有效的 Wiki 页面加入检索与员工问答；关闭不影响 Wiki 浏览和独立搜索。</span></span>
+            </label>
+            <label v-if="draft.provider === 'lancedb'" class="flex items-start gap-2 text-xs font-semibold">
+              <input v-model="draft.wikiRelatedExpansionEnabled" :disabled="!draft.wikiRetrievalEnabled" class="mt-0.5" type="checkbox" aria-label="关联页面扩展" />
+              <span><strong class="block">关联页面扩展</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">默认关闭，需先启用 Wiki 融合检索。沿命中页面的链接补充少量与问题相关的已发布页面，最多扩展一跳。</span></span>
+            </label>
             <label class="flex items-start gap-2 text-xs font-semibold">
               <input v-model="draft.ontologyEnabled" class="mt-0.5" type="checkbox" />
               <span><strong class="block text-[var(--text)]">启用本体增强检索</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">默认开启。Agent 会自动使用已发布本体扩展与重排结果；不可用时自动退回普通检索。</span></span>

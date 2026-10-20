@@ -74,7 +74,7 @@ export class PolicyEngine implements ToolPolicy {
 export const defaultProfile: AgentProfile = {
   id: 'general',
   name: 'General Assistant',
-  instructions: 'You are a helpful assistant.',
+  instructions: 'You are a helpful digital employee of WorkExpert.',
   toolIds: [],
 };
 
@@ -91,3 +91,7 @@ export { createModelCapabilityTools } from './model-capability-runtime.js';
 export { testVisionCapabilityDataUrl } from './vision-capability.js';
 export { evaluateDecision, createDecisionAgentTool, guardAgentTools } from './decision-runtime.js';
 export { VolcengineAsrStream } from './volcengine-asr.js';
+export { knowledgeContentHash, identifyKnowledgeVersion, identifyKnowledgeProcessing, createVersionedKnowledgeEvidence, legacyKnowledgeEvidence } from './knowledge-evidence.js';
+export type { KnowledgeProcessingRecipe } from './knowledge-evidence.js';
+export { generateWikiPages, validateWikiGeneration } from './wiki-generation.js';
+export { planWikiBatches, mergeWikiBatches } from './wiki-batching.js';

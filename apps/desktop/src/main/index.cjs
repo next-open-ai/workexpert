@@ -5,6 +5,13 @@ const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const { homedir, tmpdir } = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const wikiSnapshotDirectories = new Set();
+const wikiReaderWindows = new Set();
+app.once('will-quit', () => {
+  for (const directory of wikiSnapshotDirectories) {
+    try { rmSync(directory, { recursive: true, force: true }); } catch {}
+  }
+});
 const {
   getLocalEmbeddingSettings,
   maybeAutoRestartLocalEmbedding,
@@ -1845,6 +1852,29 @@ app.whenReady().then(async () => {
   ipcMain.handle('workexpert:materialize-project-assets', (_, root, assetIds) => materializeProjectAssets(root, assetIds));
   ipcMain.handle('workexpert:register-preview-root', (_, root) => registerPreviewRoot(root));
   ipcMain.handle('workexpert:register-asset-preview-root', (_, assetId) => registerAssetPreviewRoot(assetId));
+  ipcMain.handle('workexpert:open-wiki-snapshot', async (event, html, external = true) => {
+    if (event.sender !== mainWindow?.webContents || typeof html !== 'string' || Buffer.byteLength(html, 'utf8') > 32_000_000) throw new Error('Invalid Wiki snapshot.');
+    const directory = mkdtempSync(path.join(tmpdir(), 'workexpert-wiki-reader-'));
+    const target = path.join(directory, 'wiki.html');
+    writeFileSync(target, html, { encoding: 'utf8', mode: 0o600 });
+    wikiSnapshotDirectories.add(directory);
+    if (external === false) {
+      const reader = new BrowserWindow({ width: 1180, height: 840, title: 'WorkExpert · Wiki 阅读',
+        webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false } });
+      wikiReaderWindows.add(reader);
+      reader.on('closed', () => { wikiReaderWindows.delete(reader); });
+      reader.setMenu(null);
+      reader.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      const documentUrl = pathToFileURL(target).href;
+      reader.webContents.on('will-navigate', (navigation, url) => {
+        if (url.split('#')[0] !== documentUrl) navigation.preventDefault();
+      });
+      await reader.loadFile(target);
+      return;
+    }
+    const failure = await shell.openPath(target);
+    if (failure) throw new Error('无法启动默认浏览器，请检查 HTML 文件默认打开方式。');
+  });
   ipcMain.handle('workexpert:read-project-preview', (_, root, relative) => readProjectPreview(root, relative));
   ipcMain.handle('workexpert:read-asset-preview', (_, assetId) => readAssetPreview(assetId));
   ipcMain.handle('workexpert:reveal-project-file', (_, root, relative) => revealProjectFile(root, relative));

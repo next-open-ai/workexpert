@@ -107,7 +107,14 @@ export async function embedOpenAiCompatible(config: EmbedConfig, inputs: string[
   if (!config.baseUrl.trim() || !config.model.trim()) throw new Error('Embedding provider is not configured.');
   if (!inputs.length) return { vectors: [], model: config.model, dimension: 0 };
   const maxInputChars = Math.max(1, Math.min(1_000_000, Number(config.maxInputChars) || 1_000_000));
-  const prepared = inputs.map((input) => String(input).slice(0, maxInputChars));
+  const positions = new Map<string, number>();
+  const prepared: string[] = [];
+  const order = inputs.map((input) => {
+    const text = String(input).slice(0, maxInputChars);
+    let index = positions.get(text);
+    if (index === undefined) { index = prepared.length; positions.set(text, index); prepared.push(text); }
+    return index;
+  });
   const providerKey = `${config.baseUrl.replace(/\/$/, '')}\n${config.model}`;
   const configuredBatch = Math.max(1, Math.min(256, Math.floor(Number(config.maxBatch) || prepared.length)));
   let batchSize = Math.min(configuredBatch, learnedBatchLimits.get(providerKey) || configuredBatch);
@@ -130,5 +137,5 @@ export async function embedOpenAiCompatible(config: EmbedConfig, inputs: string[
       learnedBatchLimits.set(providerKey, reduced);
     }
   }
-  return { vectors, model: resolvedModel, dimension };
+  return { vectors: order.map(index => [...vectors[index]]), model: resolvedModel, dimension };
 }
