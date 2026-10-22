@@ -78,6 +78,66 @@ function fixture(t: TestContext, enable = true, generate?: typeof generateWikiPa
 
 const generationBody = { documentIds: ['doc'], idempotencyKey: 'generate-one',
   model: { provider: 'openai-compatible', chatModel: 'test-model', apiKey: 'never-persist-this-secret' } };
+test('WK-M19-T: authorized merge preview and CAS save keep publication and source draft intact', async (t) => {
+  const f = fixture(t); await f.publish();
+  const store = new KnowledgeEvidenceStore(f.database);
+  try {
+    const content = structuredClone(f.content); content.title = '出差费用'; content.bodyMarkdown = '新增流程😀'; content.sections[0].end = content.bodyMarkdown.length;
+    store.openExistingWiki({ orgId: 'org', userId: 'alice', knowledgeBaseId: 'kb' }, () => true)!.saveDraft({
+      pageId: 'new-source', slug: 'new-source', content, authorType: 'model', baseGeneration: 0, idempotencyKey: 'new-source' });
+  } finally { store.close(); }
+  assert.equal((await f.get('/pages/new-source/merge-candidates', 'bob')).statusCode, 404);
+  assert.deepEqual((await f.get('/pages/new-source/merge-candidates')).json().items, [{ pageId: 'page', title: '差旅报销' }]);
+  const previewResponse = await f.get('/pages/new-source/merge-preview?targetPageId=page');
+  assert.equal(previewResponse.statusCode, 200, previewResponse.body);
+  const { content, targetBody, addedSections, skippedSections, ...request } = previewResponse.json();
+  assert.equal(addedSections, 1); assert.equal(content.bodyMarkdown, '需要发票\n\n新增流程😀');
+  const send = (payload: object) => f.app.inject({ method: 'POST', url: '/knowledge/kb/wiki/pages/new-source/merge', headers: { 'x-user': 'alice' }, payload });
+  assert.equal((await send({ ...request, previewHash: '0'.repeat(64), idempotencyKey: 'wrong' })).statusCode, 409);
+  assert.equal((await send({ ...request, content, idempotencyKey: 'inject' })).statusCode, 400);
+  const first = await send({ ...request, idempotencyKey: 'merge' }); assert.equal(first.statusCode, 200, first.body);
+  assert.deepEqual((await send({ ...request, idempotencyKey: 'merge' })).json(), first.json());
+  assert.equal((await f.get('/pages/page')).json().revision.content.bodyMarkdown, targetBody);
+  assert.equal((await f.get('/pages/page?view=drafts')).json().revision.content.bodyMarkdown, content.bodyMarkdown);
+  assert.equal((await f.get('/pages/new-source?view=drafts')).statusCode, 200);
+  assert.equal((await send({ ...request, idempotencyKey: 'stale-preview' })).statusCode, 409);
+  assert.equal(f.modelCalls(), 0);
+});
+test('WK-R18-T: real SQLite resume reuses first batch and exposes metadata only', async (t) => {
+  let count = 0; const sizes: number[] = [];
+  const f = fixture(t, false, async (input) => {
+    const chunkIds = input.batches.flatMap((b) => b.chunks.map((c) => c.evidence.chunkId)); sizes.push(chunkIds.length);
+    if (++count === 2) throw new WikiGenerationFailure('MODEL_TIMEOUT');
+    return validateWikiGeneration({ pages: [{ key: 'p', title: '续跑主题', aliases: [], summary: '私有候选',
+      sections: [{ heading: '要求', body: '核对发票', chunkIds, relatedKeys: [] }] }] }, input);
+  }, 101);
+  const send = (payload: object, user = 'alice') => f.app.inject({ method: 'POST', url: '/knowledge/kb/wiki/generation-jobs', headers: { 'x-user': user }, payload });
+  const first = await send(generationBody); assert.equal(first.statusCode, 202, first.body);
+  const failed = await terminal(f, first.json().jobId);
+  assert.equal(failed.processedChunks, 100); assert.equal(failed.resumable, true);
+  const list = await f.get('/generation-jobs');
+  assert.equal(list.body.includes('私有候选'), false); assert.equal(list.body.includes('_checkpoint'), false);
+  const resume = { ...generationBody, resumeJobId: failed.jobId, idempotencyKey: 'resume-1' };
+  assert.equal((await send(resume, 'bob')).statusCode, 404);
+  const changed = await send({ ...resume, model: { ...generationBody.model, chatModel: 'different' } });
+  assert.equal(changed.statusCode, 409); assert.equal(changed.json().code, 'MODEL_CHANGED');
+  const next = await send(resume); assert.equal(next.statusCode, 202, next.body);
+  const done = await terminal(f, failed.jobId);
+  assert.equal(done.state, 'completed'); assert.deepEqual(sizes, [100, 1, 1]); assert.equal(done.pageIds.length, 1);
+  assert.equal((await send(resume)).json().jobId, done.jobId); assert.equal(count, 3);
+  const store = new KnowledgeEvidenceStore(f.database);
+  try { assert.equal(store.wikiCheckpoint({ orgId: 'org', userId: 'alice', knowledgeBaseId: 'kb' }, done.jobId)!.batches.length, 0); }
+  finally { store.close(); }
+});
+test('WK-R18-T: source deletion prevents resume before another model call', async (t) => {
+  const f = fixture(t, false, async () => { throw new WikiGenerationFailure('MODEL_TIMEOUT'); });
+  const send = (payload: object) => f.app.inject({ method: 'POST', url: '/knowledge/kb/wiki/generation-jobs', headers: { 'x-user': 'alice' }, payload });
+  const first = await send(generationBody); const failed = await terminal(f, first.json().jobId);
+  const store = new KnowledgeEvidenceStore(f.database);
+  try { store.suppressChunks(['chunk']); } finally { store.close(); }
+  const resumed = await send({ ...generationBody, resumeJobId: failed.jobId, idempotencyKey: 'resume-deleted' });
+  assert.equal(resumed.statusCode, 422); assert.equal(f.modelCalls(), 1);
+});
 test('WK-A07: failure reason persists without raw model content and replay never calls provider again', async (t) => {
   const f = fixture(t, false, async () => { throw new WikiGenerationFailure('MODEL_OUTPUT_TRUNCATED'); });
   const start = () => f.app.inject({ method: 'POST', url: '/knowledge/kb/wiki/generation-jobs', headers: { 'x-user': 'alice' }, payload: generationBody });

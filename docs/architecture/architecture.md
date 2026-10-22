@@ -1,5 +1,7 @@
 # WorkExpert 项目架构、模块与主要逻辑（当前权威）
 
+2026-10-21增补：[离线召回评测](../sdd/features/knowledge-evaluation/README.md)采用renderer按需加载的快照报告工具；契约位于contracts，无API/模型调用、后台任务、存储写入或在线查询钩子。只输出人工标注数据的指标，不自动影响检索或配置。
+
 > 状态：随实现演进维护；与 `README(.zh-CN)`、`docs/architecture/gateway-m*.md` 保持一致。
 > 目标读者：新成员快速建立全局观、评审人核对模块边界与数据流。
 
@@ -245,6 +247,8 @@ API：
 细节与真机人工步骤见各里程碑文档。
 
 ## 9. 已知限制与后续
+
+- Wiki [WK-T18](../sdd/features/knowledge-wiki/resumable-generation.md)增加显式断点续跑：SQLite v6任务JSON中的私有版本化检查点与进度原子保存，公开任务API不返回正文；orchestrator持有状态与恢复幂等，API重新校验来源，agent-core仍为唯一模型执行层。旧任务不回填，不自动恢复计费；下文断点续算待后续指此前基线。[WK-T19](../sdd/features/knowledge-wiki/incremental-merge.md)支持跨任务精确标题/别名匹配、保守章节追加预览及保存更新草稿；不自动发布，不做语义消歧或自动全库去重。
 
 - 对话执行采用[显式 MCP 关联](../sdd/features/chat-capability-boundary.md)：空关联不自动加载，已知用户不回退其他用户/全局连接，API执行前按保存关联重建MCP清单。平台身份统一WorkExpert，能力介绍依据本次工具，不将技能目录或历史回答视为授权。旧连接配置保留，原依赖隐式加载者需在员工详情勾选。
 

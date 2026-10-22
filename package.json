@@ -52,6 +52,7 @@
     ]
   },
   "scripts": {
+    "knowledge:evaluation:regression": "pnpm --filter @workexpert/contracts build && node --experimental-strip-types --test scripts/retrieval-evaluation-regression.mjs",
     "knowledge:acceptance": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/agent-core build && node --test packages/agent-core/dist/test/knowledge-acceptance.test.js packages/agent-core/dist/test/knowledge-hybrid.test.js packages/agent-core/dist/test/knowledge-context.test.js packages/agent-core/dist/test/knowledge-versioned-runtime.test.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",

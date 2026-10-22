@@ -49,7 +49,7 @@ export async function prepareKnowledgeSearchRegression(page) {
     if (await back.isVisible()) await back.click();
     await page.locator('article').filter({ has: page.getByRole('heading', { name: `验收知识库${id}`, exact: true }) })
       .getByRole('button', { name: '管理知识', exact: true }).click();
-    await page.getByRole('button', { name: /召回测试/ }).click();
+    await page.getByRole('button', { name: '查看测试与报告', exact: true }).click();
   }
   async function start(query) {
     const input = page.getByPlaceholder('输入查询…');
@@ -150,6 +150,39 @@ export async function prepareKnowledgeSearchRegression(page) {
     await page.getByText('检索暂未完成，请检查知识库设置或稍后重试。', { exact: true }).waitFor();
     await noText('未找到匹配结果');
     assert.equal(await page.getByRole('button', { name: '检索', exact: true }).isEnabled(), true);
+
+    await start('报告快照');
+    await settle('报告快照');
+    const countBeforeReport = requests.length;
+    const evaluation = page.locator('details').filter({ has: page.locator('summary').getByText('离线评测报告', { exact: true }) });
+    assert.equal(await evaluation.getAttribute('open'), null);
+    await evaluation.locator('summary').first().click();
+    const panel = page.getByRole('region', { name: '离线评测报告', exact: true });
+    const snapshotDownload = page.waitForEvent('download');
+    await panel.getByRole('button', { name: '导出当前召回快照', exact: true }).click();
+    const snapshotFile = await snapshotDownload;
+    const stream = await snapshotFile.createReadStream();
+    const parts = []; for await (const part of stream) parts.push(part);
+    const data = JSON.parse(Buffer.concat(parts).toString());
+    assert.equal(data.cases[0].relevantGroups, null);
+    assert.deepEqual(data.cases[0].runs[0].hits, [{ id: 'chunk:报告快照', title: '结果-报告快照' }]);
+    const fileInput = panel.getByLabel('选择标注文件并生成报告', { exact: true });
+    const upload = value => fileInput.setInputFiles({ name: 'evaluation.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(value)) });
+    await upload(data);
+    await panel.getByRole('alert').filter({ hasText: '未标注' }).waitFor();
+    data.cases[0].relevantGroups = [['chunk:报告快照']];
+    data.snapshot = '测试快照（无模型调用）';
+    await upload(data);
+    await panel.getByRole('heading', { name: '评测报告 · Top 6 · 1 题' }).waitFor();
+    const htmlDownload = page.waitForEvent('download');
+    await panel.getByRole('button', { name: '下载 HTML 报告', exact: true }).click();
+    assert.equal((await htmlDownload).suggestedFilename(), 'retrieval-evaluation.html');
+    if (process.env.WORKEXPERT_EVALUATION_SCREENSHOT) await panel.screenshot({ path: process.env.WORKEXPERT_EVALUATION_SCREENSHOT });
+    await upload({ ...data, knowledgeBaseId: 'B' });
+    await panel.getByRole('alert').filter({ hasText: '当前知识库' }).waitFor();
+    assert.equal(await panel.getByRole('button', { name: '下载 HTML 报告' }).count(), 0);
+    assert.equal(requests.length, countBeforeReport, 'offline report must not issue searches');
+    console.log('[knowledge-ui] KEV-TEST-01: lazy offline report, snapshot/download, validation, stale report clearing, zero extra searches: PASS');
 
     await start('离开页面');
     await page.getByRole('button', { name: '资产库', exact: true }).click();

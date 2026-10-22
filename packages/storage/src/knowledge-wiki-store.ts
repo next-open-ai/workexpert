@@ -6,12 +6,14 @@ import {
   type WikiScope, type WikiEvidenceRef, type WikiContent, type WikiPage, type WikiRevision,
   type WikiSaveDraft, type WikiPublish, type WikiMutation, type WikiFreshness, type WikiPageView,
   type WikiSearchHit, type WikiRelatedPage,
+  WikiMergeBodySchema, type WikiMergeBody, type WikiMergePreview,
 } from '@workexpert/contracts';
 import { knowledgeTokens } from './knowledge-tokenizer.js';
+import { appendWikiSections } from './wiki-merge.js';
 
 export class KnowledgeWikiError extends Error {
   constructor(public readonly code: 'INVALID_INPUT' | 'NOT_FOUND' | 'INVALID_EVIDENCE' | 'SOURCE_CHANGED'
-    | 'REVISION_CONFLICT' | 'IDEMPOTENCY_CONFLICT' | 'INDEX_UNAVAILABLE' | 'UNSUPPORTED_SCHEMA', message: string) {
+    | 'REVISION_CONFLICT' | 'IDEMPOTENCY_CONFLICT' | 'INDEX_UNAVAILABLE' | 'UNSUPPORTED_SCHEMA' | 'MERGE_LIMIT_EXCEEDED', message: string) {
     super(message); this.name = 'KnowledgeWikiError';
   }
 }
@@ -182,7 +184,9 @@ export class KnowledgeWikiStore {
     const value = WikiSaveDraftSchema.parse(input);
     // Authorize even an idempotent replay; receipt contains metadata, never stale plaintext.
     this.requireCurrent(value.content);
-    return this.mutate('draft', value, value, () => {
+    return this.mutate('draft', value, value, () => this.writeDraft(value));
+  }
+  private writeDraft(value: WikiSaveDraft): WikiPage {
       this.requireCurrent(value.content);
       let page = this.page(value.pageId);
       if (!page) {
@@ -213,7 +217,59 @@ export class KnowledgeWikiStore {
       this.db.prepare('UPDATE wiki_pages SET slug=?,draft_revision_id=?,generation=generation+1 WHERE page_id=? AND scope=?')
         .run(normalize(value.slug), revision.revisionId, page.pageId, this.key);
       return this.page(page.pageId)!;
+  }
+
+  mergeCandidates(sourcePageId: string): { pageId: string; title: string }[] {
+    const source = this.read(sourcePageId, { draft: true });
+    if (!source || source.page.publishedRevisionId) return fail('NOT_FOUND', 'Unpublished draft required');
+    this.requireCurrent(source.revision.content);
+    return this.search(source.revision.content.title, 50)
+      .filter((hit) => hit.pageId !== sourcePageId && hit.matchKinds.some((kind) => kind === 'title-exact' || kind === 'alias-exact'))
+      .filter((hit) => {
+        const target = this.mergeTarget(hit.pageId);
+        return target?.freshness === 'current' && [target.revision.content.title, ...target.revision.content.aliases]
+          .some((title) => normalize(title) === normalize(source.revision.content.title));
+      }).slice(0, 5).map((hit) => ({ pageId: hit.pageId, title: hit.title }));
+  }
+
+  previewMerge(sourcePageId: string, targetPageId: string): WikiMergePreview {
+    const source = this.read(sourcePageId, { draft: true });
+    const target = this.mergeTarget(targetPageId);
+    if (!source || source.page.publishedRevisionId || !target?.page.publishedRevisionId || sourcePageId === targetPageId) {
+      return fail('NOT_FOUND', 'Merge pages unavailable');
+    }
+    this.requireCurrent(source.revision.content); this.requireCurrent(target.revision.content);
+    if (![target.revision.content.title, ...target.revision.content.aliases].some((title) => normalize(title) === normalize(source.revision.content.title))) {
+      return fail('INVALID_INPUT', 'No exact topic match');
+    }
+    let result: ReturnType<typeof appendWikiSections>;
+    try { result = appendWikiSections(source, target); }
+    catch { return fail('MERGE_LIMIT_EXCEEDED', 'Merged content exceeds page limits'); }
+    return { ...result, targetPageId, sourceRevisionId: source.revision.revisionId, targetRevisionId: target.revision.revisionId,
+      sourceGeneration: source.page.generation, baseGeneration: target.page.generation,
+      targetBody: target.revision.content.bodyMarkdown, previewHash: hash(canonical(result.content)) };
+  }
+
+  mergeDraft(sourcePageId: string, input: WikiMergeBody): WikiPage {
+    const value = WikiMergeBodySchema.parse(input);
+    const source = this.read(sourcePageId, { draft: true });
+    const target = this.mergeTarget(value.targetPageId);
+    if (!source || !target) return fail('NOT_FOUND', 'Merge pages unavailable');
+    this.requireCurrent(source.revision.content); this.requireCurrent(target.revision.content);
+    return this.mutate('merge', value, { sourcePageId, ...value }, () => {
+      const preview = this.previewMerge(sourcePageId, value.targetPageId);
+      if (preview.sourceGeneration !== value.sourceGeneration || preview.baseGeneration !== value.baseGeneration
+        || preview.sourceRevisionId !== value.sourceRevisionId || preview.targetRevisionId !== value.targetRevisionId
+        || preview.previewHash !== value.previewHash) return fail('REVISION_CONFLICT', 'Merge preview changed');
+      if (!preview.addedSections) return fail('INVALID_INPUT', 'No new sections');
+      return this.writeDraft({ pageId: value.targetPageId, slug: target.page.slug, content: preview.content,
+        authorType: 'human', baseGeneration: value.baseGeneration, idempotencyKey: value.idempotencyKey });
     });
+  }
+
+  private mergeTarget(pageId: string): WikiPageView | undefined {
+    const page = this.page(pageId);
+    return page ? this.read(pageId, { draft: !!page.draftRevisionId }) : undefined;
   }
 
   private index(page: WikiPage, revision: WikiRevision): void {

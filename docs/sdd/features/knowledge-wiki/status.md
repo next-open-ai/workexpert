@@ -1,5 +1,14 @@
 # Wiki 当前状态
 
+## WK-T19（2026-10-21）
+
+完成已有主题辅助合并：未发布草稿按规范化标题/别名精确匹配已发布主题，预览优先展示新增章节，旧内容与完整结果折叠。保留目标人工草稿、证据和原发布版本，仅保存更新草稿，随后沿用核对发布。双方版本/CAS、幂等和容量拒绝保护已实现；原生成草稿保留，非自动全库去重，不做语义消歧或矛盾裁决。
+
+- storage 36/36、API 36/36、agent-core 201/201通过；API/renderer构建、用户手册回归、文档构建及diff whitespace检查通过。WK-M19-T覆盖预览、来源隔离、UTF-16、精确去重、容量拒绝、并发冲突和幂等；浏览器完整Wiki回归通过，包含匹配→预览→保存→核对发布、原发布隔离及原草稿保留。
+- 最终新增内容优先的界面已重跑浏览器并检查截图。按db技能使用临时库验证事务；agent-browser CLI缺失，使用仓库Playwright回退。无真实用户库写入、真实模型调用、安装态或规模性能验收。
+- SDD、架构说明、手册及应用内手册产物同步。无新增配置、依赖或表迁移；回退移除新入口/API即可，已保存修订沿用旧读取。保留既有构建包大小警告。
+- WK-T20来源变更入口、WK-T21检索诊断、WK-T22阅读维护待后续；统一Reranker与召回质量评测继续排除。
+
 ## WK-T11（2026-10-18）
 
 完成：仅优化混合知识库renderer交互，统一“知识库设置”，只读诊断改名“技术信息”，配置开启与实际命中分离，检索诊断默认折叠，补查询状态/标签/键盘回归。索引状态中文化，配置可用不再冒充索引就绪。保存设置清除当前旧结果。无后端、权限、数据或排序变更。
@@ -193,3 +202,19 @@
 验证通过：agent-core test 189/189（含WK-X02及真实存储WK-X03）；API test 32/32；contracts、API、renderer构建；docs:build；git diff --check。完整Wiki浏览器回归通过，覆盖默认未勾选、勾选保存/刷新、关闭主开关时禁用并保留子设置，既有阅读/发布/生成回归保持。第一次测试遇到测试夹具缺enabled以及重复保存未保留库路径，已修正夹具并重跑通过；未放宽生产校验。
 
 测试使用临时库与模拟模型，未调用真实模型。此结果证明功能闭环，不证明业务准确率提升；关键词相关性不是语义相关性，需用业务题集决定是否启用。回滚或关闭开关不删除页面，旧知识库默认不扩展。构建存在既有bundle大小警告。
+# WK-T17 生成阶段与显式重新生成 · 2026-10-21
+
+已实现并通过本轮工程验证。任务保存实际阶段与批次，失败/取消/中断保留最后阶段；进度卡保持原有布局，详情默认折叠。重新生成仅预选仍可用的原资料，用户再确认才使用当前模型与最新资料创建新任务；列表失败清空选择，已有草稿不覆盖。不是断点续算，不增加模型自动重试，不接统一 Reranker；候选检查点/跨任务合并仍待后续。
+
+已通过：`pnpm --filter @workexpert/contracts build`；orchestrator test 62/62；storage test 33/33；API build/test 33/33（均使用 `pnpm --filter @workexpert/<包> <命令>`）；renderer build（含 vue-tsc）；`pnpm concurrency:regression`；`node scripts/user-manual-regression.mjs`；`pnpm docs:build`；`git diff --check`。手册生成由 renderer prebuild 执行。已检查浏览器进度截图。第一次完整 Wiki 浏览器回归被旧“召回测试”定位阻断（现有界面已经改为“召回验证”表单），仅更新测试定位、保留原断言后，`node scripts/core-ui-browser-regression.mjs --wiki` 重跑全部通过，含阶段展示、详情默认折叠、重新生成预选/确认前零调用，以及原有长文生成、发布、搜索、来源、独立阅读、重启与删除闭环。
+
+无表迁移，旧任务可读且不猜测阶段；新增可选 JSON progress 字段，回退须保留新 contracts 兼容读写层，不将已写新字段的数据交给旧 strict schema。测试使用临时库及本机模型桩，未调用真实模型、未验证安装态；构建存在既有 bundle 大小警告。关联 [WK-D17 / WK-D17-T](generation-diagnostics.md)。
+# WK-T18 显式断点续跑 · 2026-10-21
+
+已实现并通过本轮工程验证。已校验批次、稳定归并结果保存在任务私有版本化检查点，与进度原子写入；恢复只处理未完成批次，保存失败复用同一组页面及幂等键。源快照、模型身份及批次方案变化拒绝继续。新任务支持继续，旧任务不回填；最多20次显式恢复，重复请求不会重复调用，完成清理候选。任务列表活动优先、更新时间排序，续跑旧任务仍可见；本次计时不包含之前停放时间。页面人工修改仍由CAS保护，公开任务API不返回候选正文。
+
+本轮仅交付 WK-T18，跨任务增量合并、来源更新入口、检索诊断和阅读维护待后续；按用户要求不做统一 Reranker 和召回质量评测。用户手册及应用内生成产物已同步。
+
+已执行通过：contracts build、orchestrator test 65/65、storage test 33/33、API build/test 35/35、renderer build（含类型检查）、concurrency:regression、user-manual-regression、docs:build、git diff --check。命令分别为 `pnpm --filter @workexpert/<包> build/test`、`pnpm concurrency:regression`、`node scripts/user-manual-regression.mjs`、`pnpm docs:build`。首次浏览器运行在测试服务正常退出时超过10秒，保留断言并增加失败诊断，第二次及最终 `node scripts/core-ui-browser-regression.mjs --wiki` 均完整通过。覆盖续跑取消确认零调用、确认后沿用原jobId到完成，原有长文/发布/搜索/互链/阅读/重启/删除路径保持；已检查续跑进度卡截图。首次退出超时未稳定复现，保留诊断，不宣称已定位根因。
+
+测试仅临时SQLite/文件与本机模型桩，不触碰用户库，不执行真实模型/业务质量评测；未验证安装态与真实供应商异常退出时计费。无表迁移；回滚须保留新storage/contracts兼容读取器，不将私有字段交给旧strict reader；失败任务候选仍保留，不自动删除历史。构建仍有既有bundle警告。详见 [WK-R18 / WK-R18-T](resumable-generation.md)。

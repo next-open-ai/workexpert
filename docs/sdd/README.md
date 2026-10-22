@@ -6,6 +6,7 @@
 
 | 功能 | 入口 | 状态 |
 | --- | --- | --- |
+| 离线召回评测报告 | [features/knowledge-evaluation/README.md](features/knowledge-evaluation/README.md) | KEV-T01，验证见status |
 | 对话身份与显式 MCP 关联 | [features/chat-capability-boundary.md](features/chat-capability-boundary.md) | CB-01～03，实际验证见规格状态 |
 | 统一 Agent Tool Interface | [features/unified-tool-interface/README.md](features/unified-tool-interface/README.md) | 已同步实现，待 WorkExpert 真实引擎验收 |
 | 通用应用模型机制 | [features/application-model-capabilities/README.md](features/application-model-capabilities/README.md) | 已同步实现，待真实 Provider 验收 |

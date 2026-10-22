@@ -12,6 +12,50 @@ import type { KnowledgeWikiStore } from '../knowledge-wiki-store.js';
 const scope = { orgId: 'org', userId: 'user', knowledgeBaseId: 'kb' };
 const source = { provider: 'lancedb', knowledgeBaseId: 'kb', documentId: 'document' };
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
+test('WK-M19-T: alias match previews append, preserves published/manual text and is idempotent', (t) => {
+  const f = fixture(t), wiki = f.wiki();
+  const original = publish(wiki, draft(wiki, 'target'));
+  draft(wiki, 'target', content('差旅报销', '人工保留内容'), original.generation);
+  draft(wiki, 'source', content('出差费用', '补充流程😀'));
+  assert.deepEqual(wiki.mergeCandidates('source'), [{ pageId: 'target', title: '差旅报销' }]);
+  const preview = wiki.previewMerge('source', 'target');
+  assert.equal(preview.content.bodyMarkdown, '人工保留内容\n\n补充流程😀');
+  assert.equal(preview.content.sections[1].end, preview.content.bodyMarkdown.length);
+  assert.equal(preview.addedSections, 1); assert.equal(preview.content.evidenceRefs.length, 2);
+  const { content: _content, targetBody: _body, addedSections: _added, skippedSections: _skipped, ...request } = preview;
+  const input = { ...request, idempotencyKey: 'merge-once' };
+  const saved = wiki.mergeDraft('source', input);
+  assert.deepEqual(wiki.mergeDraft('source', input), saved);
+  assert.equal(wiki.read('target')!.revision.content.bodyMarkdown, '住宿标准需要发票。');
+  assert.equal(wiki.read('target', { draft: true })!.revision.content.bodyMarkdown, preview.content.bodyMarkdown);
+  assert.ok(wiki.read('source', { draft: true }));
+  assert.equal(wiki.previewMerge('source', 'target').addedSections, 0);
+});
+test('WK-M19-T: changed previews, unrelated topics, inaccessible sources and other scopes are rejected', (t) => {
+  const f = fixture(t), wiki = f.wiki();
+  publish(wiki, draft(wiki, 'target')); const src = draft(wiki, 'source', content('差旅报销', '新增内容'));
+  const preview = wiki.previewMerge('source', 'target');
+  const { content: _content, targetBody: _body, addedSections: _added, skippedSections: _skipped, ...request } = preview;
+  draft(wiki, 'source', content('差旅报销', '修改后的新增内容'), src.generation);
+  assert.throws(() => wiki.mergeDraft('source', { ...request, idempotencyKey: 'stale' }), { code: 'REVISION_CONFLICT' });
+  draft(wiki, 'other', content('不同主题'));
+  assert.deepEqual(wiki.mergeCandidates('other'), []);
+  assert.throws(() => wiki.previewMerge('other', 'target'), { code: 'INVALID_INPUT' });
+  assert.throws(() => f.evidence.openWiki({ ...scope, userId: 'other' }, () => true).previewMerge('source', 'target'), { code: 'NOT_FOUND' });
+  f.deny(); assert.throws(() => wiki.previewMerge('source', 'target'), { code: 'NOT_FOUND' });
+});
+test('WK-M19-T: equal sections dedupe and oversized merged pages fail without writes', (t) => {
+  const f = fixture(t), wiki = f.wiki();
+  publish(wiki, draft(wiki, 'target'));
+  draft(wiki, 'source');
+  const preview = wiki.previewMerge('source', 'target');
+  assert.equal(preview.addedSections, 0); assert.equal(preview.skippedSections, 1);
+  const big = 'a'.repeat(150000);
+  publish(wiki, draft(wiki, 'big-target', content('大主题', big)));
+  draft(wiki, 'big-source', content('大主题', 'b'.repeat(150000)));
+  assert.throws(() => wiki.previewMerge('big-source', 'big-target'), { code: 'MERGE_LIMIT_EXCEEDED' });
+  assert.equal(wiki.read('big-target', { draft: true }), undefined);
+});
 function batch(revision = 'r1'): KnowledgeEvidenceBatch {
   const content = '住宿标准：报销需要发票。支付 ERROR-ABC123。';
   return { ...source, documentVersionId: `v-${revision}`, processingRevisionId: revision, sourceHash: hash(revision),
@@ -66,6 +110,20 @@ test('WK-S01a: v5→v6 explicit generation upgrade backs up Wiki and source data
   assert.equal(reopened.wikiJob(scope, 'one', true)!.jobId, 'job');
   assert.equal(reopened.wikiJob({ ...scope, userId: 'other' }, 'job'), undefined);
   assert.equal(reopened.searchKeywords('发票', 5).length, 1);
+  // WK-R18-T: durable private candidates survive reopen and metadata-only writes.
+  const job = reopened.wikiJob(scope, 'job')!;
+  reopened.saveWikiJob(job, { schemaVersion: 1, inputHash: 'b'.repeat(64), batchChunks: [1],
+    batches: [[{ pageId: 'candidate', slug: 'candidate', content: content('私有候选正文') }]], resumeKeys: [] });
+  const another = f.open();
+  assert.equal(another.wikiCheckpoint(scope, 'job')!.batches[0][0].content.title, '私有候选正文');
+  assert.equal(another.wikiCheckpoint({ ...scope, userId: 'other' }, 'job'), undefined);
+  assert.equal(JSON.stringify(another.wikiJobs(scope)).includes('私有候选正文'), false);
+  assert.equal(JSON.stringify(another.wikiJob(scope, 'job')).includes('_checkpoint'), false);
+  another.saveWikiJob({ ...job, state: 'interrupted' });
+  assert.equal(another.wikiCheckpoint(scope, 'job')!.batches.length, 1);
+  another.saveWikiJob({ ...job, jobId: 'newer', idempotencyKey: 'newer', state: 'completed' });
+  another.saveWikiJob({ ...job, state: 'running' });
+  assert.equal(another.wikiJobs(scope)[0].jobId, 'job', 'resumed older job remains visible after reload');
   // Calling initialization again must not touch or overwrite the verified backup.
   reopened.initializeWikiGeneration(backupPath);
 });
@@ -130,6 +188,8 @@ test('WK-S02: drafts invisible, publication atomic/idempotent, editing preserves
   assert.deepEqual(wiki.publish(input), published);
   assert.equal(wiki.search('报销')[0].pageId, 'page');
   const newer = draft(wiki, 'page', content('差旅新版'), published.generation);
+  // A resumed generation replays the original draft receipt, never the human's newer revision.
+  assert.deepEqual(draft(wiki), first);
   assert.equal(wiki.read('page')!.revision.content.title, '差旅报销');
   assert.equal(wiki.read('page', { draft: true })!.revision.content.title, '差旅新版');
   assert.deepEqual(wiki.read('page', { revisionId: revision.revisionId })!.revision, revision);

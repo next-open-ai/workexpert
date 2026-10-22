@@ -780,3 +780,4 @@ export * from './data-schema.js';
 export * from './voice-asr.js';
 export * from './knowledge-wiki.js';
 export * from './wiki-generation.js';
+export * from './retrieval-evaluation.js';

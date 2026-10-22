@@ -1,5 +1,11 @@
 # Wiki 追踪矩阵
 
+WK-M19 → WK-T19 → WK-M19-T：[已有主题合并预览](incremental-merge.md)。保守章节追加、双方版本校验、仅保存更新草稿；实际状态见 status。
+
+2026-10-21 WK-R18 → WK-T18 → WK-R18-T：[显式断点续跑](resumable-generation.md)替代下文“候选仅内存/不能续跑”的历史限制。旧任务仍只能重新生成，新任务按私有检查点恢复；不自动调用模型，实际验证见 status。
+
+WK-D17 → WK-T17 → WK-D17-T：[生成阶段与显式重新生成](generation-diagnostics.md)。阶段由服务端持久化；重新生成需二次确认，不是断点续算。状态见 status。
+
 0.12：WK-15 → contracts/ui → WK-T11 → WK-U08（原搜索协议与真实Wiki浏览器回归）。
 
 0.11：WK-14 → ADR-0009 / contracts → WK-T10 → WK-R04 / WK-U07。

@@ -5,6 +5,7 @@ import { wikiApi, downloadWikiSource, wikiGenerationFailureMessage } from '../..
 import { listKnowledgeDocuments, type KnowledgeBasePayload, type KnowledgeDocumentRow } from '../../services/api';
 import WikiEditor from './WikiEditor.vue';
 import WikiGenerationProgress from './WikiGenerationProgress.vue';
+import WikiMergePanel from './WikiMergePanel.vue';
 import { buildWikiReader } from './wiki-reader';
 
 const readerBusy = ref(false);
@@ -59,6 +60,11 @@ const job = ref<WikiGenerationJob>(), cancelled = ref(false), reviewed = ref(fal
 const progressStalled = ref(false);
 const editing = ref<WikiPageView>();
 const reading = ref(false);
+const mergeNotice = ref('');
+async function merged(pageId: string) {
+  mergeNotice.value = '已保存为已有主题的更新草稿，请核对来源后发布。原生成草稿仍保留。';
+  await switchView(true); await open(pageId, true);
+}
 function returnToDirectory() {
   ++pageToken; page.value = undefined; sources.value = []; related.value = []; reviewed.value = false; reading.value = false;
 }
@@ -135,7 +141,7 @@ function selectPage(id: string) {
   else void open(id);
 }
 const activeJob = computed(() => job.value && ['queued', 'running'].includes(job.value.state));
-const jobLabel = computed(() => job.value ? ({ queued: '正在排队', running: '正在整理资料', completed: '草稿已生成，请核对后发布',
+const jobLabel = computed(() => job.value ? ({ queued: '正在排队', running: '正在生成 Wiki', completed: '草稿已生成，请核对后发布',
   partial: '部分草稿已保留，请先查看', failed: '生成未完成',
   cancelled: '已取消，已保存的草稿仍保留', interrupted: '任务已中断，已保存草稿仍保留，不会自动继续计费' })[job.value.state] : '');
 let disposed = false, listToken = 0, pageToken = 0, pollToken = 0, timer: ReturnType<typeof setTimeout> | undefined;
@@ -191,9 +197,19 @@ function invalidateSearch() {
   ++listToken; ++pageToken; page.value = undefined; searchHits.value = []; loading.value = false; error.value = '';
   if (!query.value.trim()) void refresh();
 }
-async function selectSources() {
+const retryNotice = ref('');
+async function selectSources(retry = false) {
+  if (busy.value || activeJob.value) return;
+  const previousIds = retry ? job.value?.sources.map((source) => source.documentId) ?? [] : chosen.value;
+  retryNotice.value = ''; documents.value = []; chosen.value = []; requestKey = '';
   choosing.value = true; error.value = ''; busy.value = true;
-  try { const result = await listKnowledgeDocuments({ knowledgeBase: props.knowledgeBase }); if (!disposed) documents.value = result.documents; }
+  try {
+    const result = await listKnowledgeDocuments({ knowledgeBase: props.knowledgeBase });
+    if (disposed) return;
+    documents.value = result.documents;
+    chosen.value = previousIds.filter((id) => result.documents.some((document) => document.id === id));
+    if (retry) retryNotice.value = `${chosen.value.length < previousIds.length ? '部分原资料已不可用，请重新选择。' : '已选中上次资料，可调整后再开始。'}将使用当前模型和最新资料从头生成，可能产生模型费用；已有草稿保留，不是断点续跑。`;
+  }
   catch (cause) { if (!disposed) error.value = message(cause); }
   finally { if (!disposed) busy.value = false; }
 }
@@ -224,6 +240,19 @@ async function cancel() {
   if (!job.value || cancelled.value) return; cancelled.value = true;
   try { await wikiApi.cancel(kb, job.value.jobId); }
   catch (cause) { if (!disposed) { error.value = message(cause); cancelled.value = false; } }
+}
+let resumeKey = '';
+async function resumeGeneration() {
+  if (busy.value || activeJob.value || !job.value?.resumable || !props.model) return;
+  if (!window.confirm('继续未完成的生成？已校验批次会复用，未完成批次可能产生模型费用。原资料或模型改变时将拒绝继续。')) return;
+  busy.value = true; error.value = ''; resumeKey ||= crypto.randomUUID();
+  try {
+    const result = await wikiApi.start(kb, { documentIds: job.value.sources.map((source) => source.documentId),
+      model: props.model, idempotencyKey: resumeKey, resumeJobId: job.value.jobId });
+    if (disposed) return;
+    job.value = result; resumeKey = ''; cancelled.value = false; choosing.value = false; void poll();
+  } catch (cause) { if (!disposed) error.value = message(cause); }
+  finally { if (!disposed) busy.value = false; }
 }
 async function publish() {
   if (!page.value || busy.value || !reviewed.value) return;
@@ -279,17 +308,21 @@ onBeforeUnmount(() => { disposed = true; ++listToken; ++pageToken; ++pollToken; 
         <button class="wiki-primary" :disabled="readerBusy" @click="openReader()">{{ readerBusy ? '正在准备网页…' : '打开 Wiki 网页' }}</button>
         <button class="wiki-button" :disabled="readerBusy" @click="openReader(true)">在外部浏览器打开</button>
         <button class="wiki-button" :disabled="busy" @click="returnToDirectory(); switchView(false)">Wiki 首页</button>
-        <button class="wiki-primary" :disabled="busy || !!activeJob" @click="selectSources">生成 Wiki</button>
+        <button class="wiki-primary" :disabled="busy || !!activeJob" @click="selectSources()">生成 Wiki</button>
       </div>
     </header>
+    <p v-if="mergeNotice" role="status" class="mt-3 rounded-lg bg-[var(--accent-soft)] p-3 text-sm">{{ mergeNotice }}</p>
     <p v-if="error" role="alert" class="mt-3 rounded-lg border border-red-300 p-3 text-sm text-red-600">{{ error }} <button class="underline" :disabled="busy" @click="refresh(); activeJob && poll()">刷新重试</button></p>
     <WikiGenerationProgress v-if="job" :job="job" :label="jobLabel" :cancelling="cancelled" :stalled="progressStalled">
       <button v-if="activeJob" class="ml-3 underline" :disabled="cancelled" @click="cancel">{{ cancelled ? '正在取消…' : '取消生成' }}</button>
       <button v-else-if="job.pageIds.length" class="ml-3 underline" :disabled="busy" @click="switchView(true)">查看草稿</button>
+      <button v-if="!activeJob && job.state !== 'completed' && job.resumable" class="wiki-primary" :disabled="busy || !model" @click="resumeGeneration">继续生成</button>
+      <button v-if="!activeJob && job.state !== 'completed'" class="wiki-button" :disabled="busy" @click="selectSources(true)">重新生成</button>
       <p v-if="job.state === 'failed' || job.state === 'partial'" class="mt-2">{{ wikiGenerationFailureMessage(job.errorCode) }}</p>
     </WikiGenerationProgress>
     <div v-if="choosing" class="mt-4 space-y-3 rounded-lg border border-[var(--border)] p-4">
       <h3 class="font-semibold">选择资料（最多 5 份）</h3>
+      <p v-if="retryNotice" role="status" class="rounded-lg bg-[var(--accent-soft)] p-3 text-xs leading-relaxed">{{ retryNotice }}</p>
       <p class="text-xs text-[var(--muted)]">长资料自动分批处理，最多 400 块、192,000 字符。同名主题汇集后仍需核对；不同标题不会自动合并。</p>
       <p class="text-xs text-[var(--muted)]">完整文本将发送给 {{ model?.chatModel || '尚未配置的对话模型' }}。点击开始后调用模型，生成后仍需核对。重新生成会创建新草稿，不覆盖旧页面。</p>
       <p v-if="!model" class="text-sm">请先在设置中配置对话模型。浏览和搜索不受影响。</p>
@@ -346,6 +379,7 @@ onBeforeUnmount(() => { disposed = true; ++listToken; ++pageToken; ++pollToken; 
         <button class="wiki-button" :disabled="busy || page.freshness !== 'current'" @click="edit">{{ page.page.draftRevisionId ? '编辑草稿 / 对照版本' : '编辑为新草稿' }}</button>
         <h2 class="text-xl font-semibold">{{ page.revision.content.title }}</h2>
         <p class="text-sm text-[var(--muted)]">{{ page.revision.content.summary }}</p>
+        <WikiMergePanel v-if="!page.page.publishedRevisionId && page.page.draftRevisionId === page.revision.revisionId && page.freshness === 'current'" :key="page.revision.revisionId" :kb="kb" :source-page-id="page.page.pageId" :disabled="busy || !!activeJob" @saved="merged" />
         <p v-if="page.freshness === 'stale'" role="status" class="text-sm text-amber-700">来源已更新，本文待核对；请重新生成，旧引用仍可查看。</p>
         <div v-for="section in page.revision.content.sections" :key="section.sectionId" class="space-y-2">
           <h3 :id="sectionAnchor(section.sectionId)" tabindex="-1" class="scroll-mt-6 rounded font-semibold focus:outline-2 focus:outline-[var(--accent)]">{{ section.headingPath.join(' / ') }}</h3>

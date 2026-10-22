@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   WikiHttpParamsSchema, WikiListQuerySchema, WikiReadQuerySchema, WikiHttpSearchSchema,
   WikiRelatedQuerySchema, WikiEditBodySchema, WikiPublishBodySchema, WikiMutationSchema,
+  WikiMergeBodySchema, WikiMergeTargetSchema, WikiEmptyBodySchema,
 } from '@workexpert/contracts';
 import { KnowledgeEvidenceStore, KnowledgeSourceStore, ImmutableFileStore, KnowledgeWikiError } from '@workexpert/storage';
 import { KnowledgeAccessError, KnowledgeCatalog } from './catalog.js';
@@ -17,6 +18,8 @@ export function registerWikiRoutes(app: FastifyInstance, dependencies: { dataRoo
     ['GET', '/pages/:pageId/related', 'related'], ['PUT', '/pages/:pageId/draft', 'edit'],
     ['POST', '/pages/:pageId/publish', 'publish'], ['POST', '/pages/:pageId/archive', 'archive'],
     ['GET', '/pages/:pageId/sources', 'sources'],
+    ['GET', '/pages/:pageId/merge-candidates', 'merge-candidates'],
+    ['GET', '/pages/:pageId/merge-preview', 'merge-preview'], ['POST', '/pages/:pageId/merge', 'merge'],
   ] as const;
   for (const [method, suffix, action] of actions) app.route({
     method, url: prefix + suffix, bodyLimit: 1024 * 1024,
@@ -24,7 +27,8 @@ export function registerWikiRoutes(app: FastifyInstance, dependencies: { dataRoo
       reply.header('Cache-Control', 'no-store');
       if (!request.auth) return reply.code(401).send({ code: 'UNAUTHORIZED', message: 'Authentication required.' });
       const params = WikiHttpParamsSchema.safeParse(request.params);
-      const schema = action === 'list' ? WikiListQuerySchema : action === 'read' || action === 'sources' ? WikiReadQuerySchema
+      const schema = action === 'merge-candidates' ? WikiEmptyBodySchema : action === 'merge-preview' ? WikiMergeTargetSchema
+        : action === 'merge' ? WikiMergeBodySchema : action === 'list' ? WikiListQuerySchema : action === 'read' || action === 'sources' ? WikiReadQuerySchema
         : action === 'search' ? WikiHttpSearchSchema : action === 'related' ? WikiRelatedQuerySchema
         : action === 'edit' ? WikiEditBodySchema : action === 'publish' ? WikiPublishBodySchema : WikiMutationSchema;
       const parsed = schema.safeParse(method === 'GET' ? request.query : request.body);
@@ -59,6 +63,20 @@ export function registerWikiRoutes(app: FastifyInstance, dependencies: { dataRoo
             && snapshot.documentId === ref.evidence.documentId;
         });
         if (!wiki) return empty();
+        if (action === 'merge-candidates') return { items: wiki.mergeCandidates(pageId!) };
+        if (action === 'merge-preview') return wiki.previewMerge(pageId!, WikiMergeTargetSchema.parse(parsed.data).targetPageId);
+        if (action === 'merge') {
+          const body = WikiMergeBodySchema.parse(parsed.data);
+          // Read the exact previewed revisions to verify original bytes without a write lock.
+          const views = [wiki.read(pageId!, { revisionId: body.sourceRevisionId }), wiki.read(body.targetPageId, { revisionId: body.targetRevisionId })];
+          if (views.some((view) => !view)) return missing();
+          const versions = new Set(views.flatMap((view) => view!.revision.content.evidenceRefs.map((ref) => {
+            if (ref.evidence.verification !== 'versioned') throw new Error('Invalid evidence');
+            return ref.evidence.documentVersionId;
+          })));
+          for (const version of versions) if (!sources.read(owner, version)) return missing();
+          return wiki.mergeDraft(pageId!, body);
+        }
         if (action === 'list') {
           const query = WikiListQuerySchema.parse(parsed.data);
           const views = wiki.list({ draft: query.view === 'drafts', limit: query.limit, afterPageId: query.afterPageId });
@@ -112,7 +130,7 @@ export function registerWikiRoutes(app: FastifyInstance, dependencies: { dataRoo
           const code = error.code;
           if (code === 'NOT_FOUND') return missing();
           const status = ['REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'SOURCE_CHANGED'].includes(code) ? 409
-            : ['INVALID_INPUT', 'INVALID_EVIDENCE'].includes(code) ? 400 : 503;
+            : ['INVALID_INPUT', 'INVALID_EVIDENCE', 'MERGE_LIMIT_EXCEEDED'].includes(code) ? 400 : 503;
           return reply.code(status).send({ code, message: 'Wiki operation could not be completed.' });
         }
         return reply.code(503).send({ code: 'WIKI_UNAVAILABLE', message: 'Wiki is temporarily unavailable.' });

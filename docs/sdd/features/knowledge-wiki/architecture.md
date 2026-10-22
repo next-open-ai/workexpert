@@ -1,5 +1,7 @@
 # Wiki 架构设计
 
+2026-10-21 WK-R18 → WK-T18 → WK-R18-T：[显式断点续跑](resumable-generation.md)替代下文“候选仅内存/不能续跑”的历史限制。旧任务仍只能重新生成，新任务按私有检查点恢复；不自动调用模型，实际验证见 status。
+
 状态：实施中；规格版本：0.2；更新日期：2026-10-16。关联：[ADR](../../../architecture/adr/0006-evidence-driven-wiki.md)、[契约](contracts.md)。本文为目标架构，已实现范围以 status 为准。
 
 ## 1. 模块所有权

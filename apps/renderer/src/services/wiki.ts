@@ -1,5 +1,5 @@
 import type { WikiDirectory, WikiPageView, WikiPage, WikiSearchHit, WikiRelatedPage, WikiSources,
-  WikiGenerationJob, WikiGenerationRequest, WikiContent } from '@workexpert/contracts';
+  WikiGenerationJob, WikiGenerationRequest, WikiContent, WikiMergePreview, WikiMergeBody } from '@workexpert/contracts';
 import { getStoredSessionToken } from './auth';
 
 const base = () => window.location.protocol === 'file:' ? 'http://127.0.0.1:50832' : '';
@@ -35,11 +35,17 @@ async function request<T>(kb: string, suffix: string, body?: unknown, method?: '
       INVALID_EVIDENCE: '原文证据不可用，请检查资料后重新入库。', CAPACITY_EXCEEDED: '本知识库已有生成任务，请稍后再试。',
       SOURCE_CHANGED: '来源已变化，请重新生成并核对。', REVISION_CONFLICT: '页面已变化，请刷新后核对。',
       NOT_FOUND: '页面、来源或任务不可访问。', IDEMPOTENCY_CONFLICT: '请求已变化，请重新发起。' };
+    labels.RESUME_UNAVAILABLE = '此任务无法继续或已达到续跑次数上限，请重新生成。';
+    labels.MODEL_CHANGED = '当前模型与原任务不同，请切回原模型继续，或选择重新生成。';
+    labels.MERGE_LIMIT_EXCEEDED = '合并内容超出单页容量，请精简草稿或保留为独立页面。';
     throw new WikiRequestError(String(error.code || 'WIKI_UNAVAILABLE'), labels[error.code] || 'Wiki 操作未完成，请稍后重试。');
   }
   return response.json();
 }
 export const wikiApi = {
+  mergeCandidates: (kb: string, id: string) => request<{ items: { pageId: string; title: string }[] }>(kb, `/pages/${encodeURIComponent(id)}/merge-candidates`),
+  mergePreview: (kb: string, id: string, target: string) => request<WikiMergePreview>(kb, `/pages/${encodeURIComponent(id)}/merge-preview?targetPageId=${encodeURIComponent(target)}`),
+  merge: (kb: string, id: string, input: WikiMergeBody) => request<WikiPage>(kb, `/pages/${encodeURIComponent(id)}/merge`, input),
   list: (kb: string, drafts: boolean, after?: string) => request<WikiDirectory>(kb, `/pages?view=${drafts ? 'drafts' : 'published'}&limit=20${after ? '&afterPageId=' + encodeURIComponent(after) : ''}`),
   read: (kb: string, id: string, drafts: boolean) => request<WikiPageView>(kb, `/pages/${encodeURIComponent(id)}?view=${drafts ? 'drafts' : 'published'}`),
   revision: (kb: string, id: string, revisionId: string) => request<WikiPageView>(kb, `/pages/${encodeURIComponent(id)}?revisionId=${encodeURIComponent(revisionId)}`),

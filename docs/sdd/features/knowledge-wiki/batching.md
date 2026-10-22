@@ -1,5 +1,7 @@
 # Wiki 有界分批生成（WK-T04b）
 
+2026-10-21 WK-R18 → WK-T18 → WK-R18-T：[显式断点续跑](resumable-generation.md)替代下文“候选仅内存/不能续跑”的历史限制。旧任务仍只能重新生成，新任务按私有检查点恢复；不自动调用模型，实际验证见 status。
+
 状态：实施中；规格版本：0.7；日期：2026-10-16。关联：[ADR-0006](../../../architecture/adr/0006-evidence-driven-wiki.md)、[状态](status.md)。本阶段替代 closure 中单批输入限制，不扩大权限范围。
 
 ## 范围与契约

@@ -91,7 +91,8 @@ export function registerWikiGenerationRoutes(app: FastifyInstance, dependencies:
       const repository: WikiJobRepository = {
         get: (id, byKey) => access((store) => store.wikiJob(scope, id, byKey)),
         list: () => access((store) => store.wikiJobs(scope)),
-        save: (job) => access((store) => store.saveWikiJob(job)),
+        save: (job, checkpoint) => access((store) => store.saveWikiJob(job, checkpoint)),
+        checkpoint: (id) => access((store) => store.wikiCheckpoint(scope, id)),
       };
       try {
         if (action === 'list') return { items: repository.list().slice(0, 5).map((job) => getService().read(repository, job.jobId)) };
@@ -100,10 +101,17 @@ export function registerWikiGenerationRoutes(app: FastifyInstance, dependencies:
           return job ?? reply.code(404).send({ code: 'NOT_FOUND', message: 'Generation job not found.' });
         }
         const body = WikiGenerationRequestSchema.parse(parsed.data);
+        if (body.resumeJobId) {
+          const previous = getService().read(repository, body.resumeJobId);
+          if (!previous) throw new GenerationInputError('NOT_FOUND', 404);
+          if (previous.state === 'completed' || repository.checkpoint!(previous.jobId)?.resumeKeys.includes(body.idempotencyKey)) {
+            return reply.code(202).send(previous);
+          }
+        }
         const requestHash = createHash('sha256').update(JSON.stringify({ documentIds: [...body.documentIds].sort(),
           model: { provider: body.model.provider, baseUrl: body.model.baseUrl, chatModel: body.model.chatModel } })).digest('hex');
         // Replays never invoke the model, even when source heads have since changed.
-        const prior = repository.get(body.idempotencyKey, true);
+        const prior = !body.resumeJobId && repository.get(body.idempotencyKey, true);
         if (prior) {
           if (prior.requestHash !== requestHash) throw new WikiGenerationError('IDEMPOTENCY_CONFLICT');
           return reply.code(202).send(getService().read(repository, prior.jobId));
@@ -126,6 +134,8 @@ export function registerWikiGenerationRoutes(app: FastifyInstance, dependencies:
           }
         };
         const job = await getService().start({ scope, idempotencyKey: body.idempotencyKey, requestHash,
+          resumeJobId: body.resumeJobId,
+          checkpointHash: createHash('sha256').update(JSON.stringify({ recipe: 'wiki-batches-v1', input })).digest('hex'),
           sources: input.batches.map(({ documentId, documentVersionId, processingRevisionId }) => ({ documentId, documentVersionId, processingRevisionId })),
           totalChunks: input.batches.reduce((n, batch) => n + batch.chunks.length, 0), repository,
           batchChunks: batches.map((batch) => batch.batches.reduce((n, b) => n + b.chunks.length, 0)),

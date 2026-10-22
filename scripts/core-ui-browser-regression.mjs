@@ -49,7 +49,9 @@ async function stopApi() {
 
 async function restartApi() {
   const previousPid = api.pid;
-  assert.equal(await stopApi(), false, 'normal restart must not require forced termination');
+  const forced = await stopApi();
+  if (forced) console.error('[core-ui] API shutdown diagnostics:', logs);
+  assert.equal(forced, false, 'normal restart must not require forced termination');
   api = startApi();
   await waitForApi();
   assert.notEqual(api.pid, previousPid, 'restart must create a new API process');

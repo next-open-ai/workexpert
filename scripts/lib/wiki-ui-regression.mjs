@@ -74,6 +74,8 @@ export async function prepareWikiRegression(page) {
       await wiki.getByRole('button', { name: '开始生成（1 份）', exact: true }).click();
       const progress = wiki.getByRole('region', { name: 'Wiki 生成进度' });
       await progress.getByText(/模型正在阅读资料/).waitFor();
+      await progress.getByText('当前阶段：整理资料 · 第 1/1 批', { exact: true }).waitFor();
+      assert.equal(await progress.locator('details').getAttribute('open'), null);
       assert.equal(await progress.getByRole('progressbar').getAttribute('aria-valuenow'), '0');
       await progress.getByText(/已等待/).waitFor();
       await progress.getByRole('button', { name: '取消生成', exact: true }).waitFor();
@@ -219,9 +221,8 @@ export async function prepareWikiRegression(page) {
       assert.equal(await page.getByRole('checkbox', { name: '关联页面扩展', exact: true }).isChecked(), true);
       await page.locator('form').filter({ has: page.getByRole('checkbox', { name: '启用 Wiki 融合检索', exact: true }) }).getByRole('button', { name: '关闭', exact: true }).click();
       await recallCard.getByRole('button', { name: '管理知识', exact: true }).click();
-      await page.getByRole('button', { name: /召回测试/ }).click();
-      await page.getByPlaceholder('输入查询…', { exact: true }).fill('差旅费用');
-      await page.getByRole('button', { name: '检索', exact: true }).click();
+      await page.getByRole('textbox', { name: '输入召回测试问题', exact: true }).fill('差旅费用');
+      await page.getByRole('button', { name: '开始验证', exact: true }).click();
       await page.getByText('Wiki 整理', { exact: true }).first().waitFor();
       assert.equal(await page.getByText(/Wiki 是带原文引用的整理内容/).count(), 1);
       assert.equal(await page.getByText(/排序分/).first().isVisible(), false);
@@ -232,7 +233,7 @@ export async function prepareWikiRegression(page) {
       await currentSettings.waitFor({ state: 'hidden' });
       assert.equal(await page.getByText('Wiki 整理', { exact: true }).count(), 0);
       await page.getByText('输入实际问题或关键词，检查能否找到需要的内容。', { exact: true }).waitFor();
-      await page.getByRole('button', { name: '检索', exact: true }).click();
+      await page.getByRole('button', { name: '开始验证', exact: true }).click();
       await page.getByText('Wiki 整理', { exact: true }).first().waitFor();
       if (process.env.WORKEXPERT_KNOWLEDGE_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.WORKEXPERT_KNOWLEDGE_SCREENSHOT_DIR}/knowledge-search.png`, fullPage: true });
       await page.getByRole('button', { name: '查看 Wiki 与来源', exact: true }).first().click();
@@ -316,15 +317,25 @@ export async function prepareWikiRegression(page) {
       await page.reload(); await dismiss(); await open();
       await wiki.getByText('模型输出达到长度上限，结果不完整。请减少所选资料或更换模型后重新生成。', { exact: true }).waitFor();
       assert.equal(calls, callsBeforeFailure + 1, 'reload must not retry failed models');
+      if (process.env.WORKEXPERT_WIKI_RESUME_SCREENSHOT) await wiki.getByRole('region', { name: 'Wiki 生成进度' }).screenshot({ path: process.env.WORKEXPERT_WIKI_RESUME_SCREENSHOT });
       truncate = false;
-      await wiki.getByRole('button', { name: '生成 Wiki', exact: true }).click();
-      await wiki.getByRole('checkbox', { name: '长文制度', exact: true }).check();
+      await wiki.getByRole('button', { name: '重新生成', exact: true }).click();
+      await wiki.getByText(/已选中上次资料，可调整后再开始/).waitFor();
+      assert.equal(await wiki.getByRole('checkbox', { name: '长文制度', exact: true }).isChecked(), true);
+      assert.equal(calls, callsBeforeFailure + 1, 'opening retry confirmation must not call model');
+      await wiki.getByRole('button', { name: '收起', exact: true }).click();
+      page.once('dialog', dialog => dialog.dismiss());
+      await wiki.getByRole('button', { name: '继续生成', exact: true }).click();
+      assert.equal(calls, callsBeforeFailure + 1, 'declining resume must not call model');
       const startedLong = page.waitForResponse((response) => response.url().endsWith('/wiki/generation-jobs') && response.request().method() === 'POST');
-      await wiki.getByRole('button', { name: '开始生成（1 份）', exact: true }).click();
+      page.once('dialog', dialog => dialog.accept());
+      await wiki.getByRole('button', { name: '继续生成', exact: true }).click();
       await startedLong;
       await wiki.getByRole('button', { name: '开始生成（1 份）', exact: true }).waitFor({ state: 'hidden' });
       await wiki.getByText(/草稿已生成，请核对后发布/).waitFor({ timeout: 30000 });
       const longJob = (await api('/api/knowledge/wiki-e2e/wiki/generation-jobs', undefined, 'GET')).items[0];
+      assert.equal(longJob.jobId, failedJob.jobId, 'resume retains original job identity');
+      assert.equal(longJob.resumable, false);
       assert.equal(longJob.state, 'completed'); assert.equal(longJob.processedChunks, longJob.totalChunks);
       assert.ok(calls >= 3); assert.equal(longJob.pageIds.length, 2);
       await wiki.getByText(`已处理 ${longJob.totalChunks}/${longJob.totalChunks} 个文本块`, { exact: false }).waitFor();
@@ -336,6 +347,34 @@ export async function prepareWikiRegression(page) {
       await wiki.getByRole('button', { name: '发布此页', exact: true }).click();
       assert.equal((await api('/api/knowledge/wiki-e2e/wiki/search?query=差旅费用', undefined, 'GET')).items.length, 1);
       console.log('[wiki-ui] long document → sequential Pi calls → same-title sections/evidence → progress → publish/search: PASS');
+      // WK-M19-T: reuse an unpublished generated page as an explicit supplemental draft.
+      const targetId = longJob.pageIds[0], sourceId = longJob.pageIds[1];
+      const publishedBefore = await api(`/api/knowledge/wiki-e2e/wiki/pages/${targetId}`, undefined, 'GET');
+      const supplemental = await api(`/api/knowledge/wiki-e2e/wiki/pages/${sourceId}?view=drafts`, undefined, 'GET');
+      const supplementContent = structuredClone(supplemental.revision.content);
+      supplementContent.title = publishedBefore.revision.content.title;
+      supplementContent.bodyMarkdown += '\n\n新增办理说明😀';
+      supplementContent.sections.at(-1).end = supplementContent.bodyMarkdown.length;
+      await api(`/api/knowledge/wiki-e2e/wiki/pages/${sourceId}/draft`, {
+        baseGeneration: supplemental.page.generation, slug: supplemental.page.slug, content: supplementContent, idempotencyKey: 'merge-ui-supplement',
+      }, 'PUT');
+      await wiki.getByRole('button', { name: '待发布草稿', exact: true }).click();
+      await wiki.getByRole('navigation', { name: 'Wiki 页面目录' }).getByRole('button', { name: new RegExp(publishedBefore.revision.content.title) }).click();
+      const mergePanel = wiki.getByRole('region', { name: '已有主题合并' });
+      await mergePanel.getByRole('button', { name: `预览合并：${publishedBefore.revision.content.title}`, exact: true }).click();
+      await mergePanel.getByText('合并后的完整预览', { exact: true }).waitFor();
+      assert.equal((await api(`/api/knowledge/wiki-e2e/wiki/pages/${targetId}`, undefined, 'GET')).revision.revisionId, publishedBefore.revision.revisionId);
+      if (process.env.WORKEXPERT_WIKI_MERGE_SCREENSHOT) await mergePanel.screenshot({ path: process.env.WORKEXPERT_WIKI_MERGE_SCREENSHOT });
+      await mergePanel.getByRole('button', { name: '保存为更新草稿', exact: true }).click();
+      await wiki.getByText('已保存为已有主题的更新草稿，请核对来源后发布。原生成草稿仍保留。', { exact: true }).waitFor();
+      const mergedDraft = await api(`/api/knowledge/wiki-e2e/wiki/pages/${targetId}?view=drafts`, undefined, 'GET');
+      assert.ok(mergedDraft.revision.content.bodyMarkdown.includes('新增办理说明😀'));
+      assert.equal((await api(`/api/knowledge/wiki-e2e/wiki/pages/${targetId}`, undefined, 'GET')).revision.revisionId, publishedBefore.revision.revisionId);
+      assert.ok((await api(`/api/knowledge/wiki-e2e/wiki/pages/${sourceId}?view=drafts`, undefined, 'GET')).page.draftRevisionId);
+      await wiki.getByRole('checkbox', { name: /我已核对正文和来源/ }).check();
+      await wiki.getByRole('button', { name: '发布此页', exact: true }).click();
+      assert.ok((await api(`/api/knowledge/wiki-e2e/wiki/pages/${targetId}`, undefined, 'GET')).revision.content.bodyMarkdown.includes('新增办理说明😀'));
+      console.log('[wiki-ui] WK-M19-T topic match → preview → new draft → review/publish, original source retained: PASS');
       console.log('[wiki-ui] direct Wiki entry → page/section navigation → focus/collapse → real pagination preserves reading → narrow layout: PASS');
       console.log('[wiki-ui] real ingest → Pi generation → review/publish → alias/BM25 → links/source download → restart/delete: PASS');
     },

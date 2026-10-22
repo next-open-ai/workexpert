@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { MAX_LOCAL_KNOWLEDGE_FILE_BYTES, MAX_BAILIAN_KNOWLEDGE_FILE_BYTES, MAX_KNOWLEDGE_TEXT_CHARS } from '@workexpert/contracts';
 import { useI18n } from '../../app/i18n';
 import {
@@ -13,6 +13,8 @@ import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById, toModelPayloa
 import { useNotify } from '../../app/notify';
 import OntologyWorkbench from './OntologyWorkbench.vue';
 import WikiWorkbench from './WikiWorkbench.vue';
+const RetrievalEvaluationPanel = defineAsyncComponent(() => import('./RetrievalEvaluationPanel.vue'));
+const evaluationOpen = ref(false);
 import {
   deleteKnowledgeChunk,
   deleteKnowledgeDocument,
@@ -82,6 +84,7 @@ const searchHits = ref<Array<{ id: string; title: string; content: string; score
 const selectedChunk = ref<KnowledgeChunkRow | null>(null);
 const wikiPageId = ref<string>();
 watch(selectedId, () => { wikiPageId.value = undefined; });
+watch(selectedId, () => { evaluationOpen.value = false; });
 function openWikiResult(pageId: string) { wikiPageId.value = pageId; detailTab.value = 'wiki'; }
 let searchRequestId = 0;
 
@@ -1051,6 +1054,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             <button type="submit" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white active:scale-[0.98]" :disabled="searching">
               {{ searching ? '正在验证' : '开始验证' }}
             </button>
+            <button type="button" class="rounded-lg px-2 py-2 text-xs text-[var(--muted)] underline" @click="detailTab = 'search'">查看测试与报告</button>
           </form>
         </article>
 
@@ -1124,6 +1128,10 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
         </article>
 
         <article v-if="detailTab === 'search'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+          <details class="mb-4 text-xs" @toggle="evaluationOpen ||= ($event.target as HTMLDetailsElement).open">
+            <summary class="cursor-pointer py-2 font-semibold">离线评测报告</summary>
+            <RetrievalEvaluationPanel v-if="evaluationOpen" :key="selected.id" :knowledge-base-id="selected.id" :query="searchQuery" :hits="searchHits" :ready="!!searchStrategy && !searching && !searchError" />
+          </details>
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div><h3 class="text-base font-bold">{{ t('knowledge.searchTitle') }}</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.searchHelp') }}</p></div>
             <details class="max-w-full text-xs text-[var(--muted)]">

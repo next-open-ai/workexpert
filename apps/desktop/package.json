@@ -8,6 +8,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "pnpm --filter @workexpert/contracts build && pnpm --filter @workexpert/tools build && pnpm --filter @workexpert/storage build && pnpm --filter @workexpert/channel build && pnpm --filter @workexpert/gateway build && pnpm --filter @workexpert/agent-core build && pnpm --filter @workexpert/orchestrator build && pnpm --filter @workexpert/api build && pnpm --filter @workexpert/renderer build",
     "stage": "node scripts/stage.mjs",
+    "test": "node --test scripts/stage-dependencies.test.mjs",
     "package": "node ../../scripts/prepare-agentscope-runtime.mjs && pnpm build && pnpm stage && electron-builder --publish never",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

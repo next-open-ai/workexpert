@@ -4,6 +4,7 @@ import { completeSimple } from '@mariozechner/pi-ai';
 import { z } from 'zod';
 import { KnowledgeSourceSnapshotSchema, type KnowledgeSourceSnapshot, type KnowledgeEvidence, type KnowledgeRetrieval, type KnowledgeBaseRuntime, type ModelCapabilityRuntime, type ModelConfig, type OntologyNode } from '@workexpert/contracts';
 import { fuseKnowledgeRanks } from './knowledge-hybrid.js';
+import { knowledgeStorageWriteError } from './knowledge-storage-error.js';
 import { OntologyQueryConstraintsSchema } from '@workexpert/contracts';
 import { recallWiki, currentWikiRevisions } from './wiki-retrieval.js';
 import { chunkStructuredKnowledge, STRUCTURED_CHUNKER } from './knowledge-chunker.js';
@@ -356,8 +357,7 @@ async function tryLanceUpsert(dataDir: string, rows: LocalChunk[], managed = fal
     return true;
   } catch (error) {
     if (managed) {
-      if ((error as { code?: string }).code === 'EMBEDDING_DIMENSION_MISMATCH') throw error;
-      throw new Error('知识入库未完成：检索数据写入失败，原文已保留，请重试。', { cause: error });
+      throw knowledgeStorageWriteError(error);
     }
     return false;
   }

@@ -117,3 +117,35 @@ test('KE-F04: asset bridge rejects legacy ownerless assets, foreign orgs, bundle
     assert.throws(() => readOwnedSourceFile({ owner, asset, target: link, assetsRoot: root }), /Unsafe/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('DK-T03: component failure reaches UI with stable code and retained original', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workexpert-component-error-'));
+  const principal = { orgId: 'org', userId: 'alice' };
+  new KnowledgeCatalog(root).save(principal, [{ id: 'kb', name: 'Knowledge', provider: 'lancedb' }]);
+  const app = Fastify();
+  const message = '当前安装包的本地检索组件缺失或不兼容，请安装修复版本后重试。';
+  app.addHook('preHandler', async (request) => {
+    request.auth = { ...principal, username: 'alice', displayName: 'Alice', role: 'member', sessionId: 'test' };
+  });
+  registerSourceIngest(app, {
+    dataRoot: () => root,
+    identifyVersion: (_scope, bytes) => ({ sourceHash: createHash('sha256').update(bytes).digest('hex'),
+      documentVersionId: 'dv-' + createHash('sha256').update(bytes).digest('hex') }),
+    ingest: async () => { throw Object.assign(new Error(message, { cause: new Error('/private/native/path') }), {
+      code: 'KNOWLEDGE_STORAGE_COMPONENT_UNAVAILABLE',
+    }); },
+    readAsset: async () => { throw new Error('Not used'); },
+  });
+  try {
+    const response = await app.inject({ method: 'POST', url: '/knowledge/ingest', payload: {
+      knowledgeBase: { id: 'kb', name: 'Knowledge', provider: 'lancedb' }, title: 'Test', content: '原文保留',
+    } });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().code, 'KNOWLEDGE_STORAGE_COMPONENT_UNAVAILABLE');
+    assert.equal(response.json().message, message);
+    assert.doesNotMatch(response.body, /private\/native/);
+    const original = await app.inject({ method: 'GET', url: `/knowledge/sources/${response.json().sourceSnapshot.documentVersionId}` });
+    assert.equal(original.statusCode, 200);
+    assert.equal(original.body, '原文保留');
+  } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});

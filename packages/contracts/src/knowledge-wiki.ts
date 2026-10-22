@@ -129,3 +129,15 @@ export const WikiSourcesSchema = z.object({ items: z.array(z.object({
   refId: id, sectionId: id, evidence: KnowledgeEvidenceSchema, text: z.string(), fileName: z.string(),
 })) });
 export type WikiSources = z.infer<typeof WikiSourcesSchema>;
+export const WikiMergeTargetSchema = z.object({ targetPageId: id }).strict();
+export const WikiMergeBodySchema = WikiMergeTargetSchema.extend({
+  sourceRevisionId: id, targetRevisionId: id, sourceGeneration: z.number().int().nonnegative(),
+  baseGeneration: z.number().int().nonnegative(), previewHash: digest,
+  idempotencyKey: z.string().min(1).max(128),
+}).strict();
+export type WikiMergeBody = z.infer<typeof WikiMergeBodySchema>;
+export const WikiMergePreviewSchema = WikiMergeBodySchema.omit({ idempotencyKey: true }).extend({
+  content: WikiContentSchema, targetBody: z.string(), addedSections: z.number().int().nonnegative(),
+  skippedSections: z.number().int().nonnegative(),
+}).strict();
+export type WikiMergePreview = z.infer<typeof WikiMergePreviewSchema>;

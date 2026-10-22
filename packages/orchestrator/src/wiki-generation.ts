@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { WikiGenerationJob, WikiScope, WikiGeneratedPage } from '@workexpert/contracts';
+import type { WikiGenerationJob, WikiScope, WikiGeneratedPage, WikiGenerationCheckpoint } from '@workexpert/contracts';
 import { wikiGenerationFailureCode } from '@workexpert/contracts';
 import type { ExecutionDispatcher } from './execution-dispatcher.js';
 import { withKeyLock } from './lock.js';
@@ -7,10 +7,11 @@ import { withKeyLock } from './lock.js';
 export interface WikiJobRepository {
   get(id: string, byKey?: boolean): WikiGenerationJob | undefined;
   list(): WikiGenerationJob[];
-  save(job: WikiGenerationJob): void;
+  save(job: WikiGenerationJob, checkpoint?: WikiGenerationCheckpoint): void;
+  checkpoint?(id: string): WikiGenerationCheckpoint | undefined;
 }
 export class WikiGenerationError extends Error {
-  constructor(public readonly code: 'CAPACITY_EXCEEDED' | 'IDEMPOTENCY_CONFLICT') { super(code); }
+  constructor(public readonly code: 'CAPACITY_EXCEEDED' | 'IDEMPOTENCY_CONFLICT' | 'RESUME_UNAVAILABLE' | 'SOURCE_CHANGED' | 'MODEL_CHANGED') { super(code); }
 }
 const active = (job: WikiGenerationJob) => job.state === 'queued' || job.state === 'running';
 
@@ -33,6 +34,7 @@ export class WikiGenerationService {
     scope: WikiScope; idempotencyKey: string; requestHash: string;
     sources: WikiGenerationJob['sources']; totalChunks: number; repository: WikiJobRepository;
     batchChunks?: number[];
+    checkpointHash?: string; resumeJobId?: string;
     generate: (signal: AbortSignal, batchIndex: number) => Promise<WikiGeneratedPage[]>;
     merge?: (batches: WikiGeneratedPage[][]) => WikiGeneratedPage[];
     savePage: (page: WikiGeneratedPage, jobId: string, linkPhase: boolean) => void;
@@ -43,46 +45,77 @@ export class WikiGenerationService {
       throw new Error('INVALID_BATCH_PLAN');
     }
     return withKeyLock(`wiki:${JSON.stringify(input.scope)}`, () => {
-      const prior = input.repository.get(input.idempotencyKey, true);
+      const prior = !input.resumeJobId && input.repository.get(input.idempotencyKey, true);
       if (prior) {
         if (prior.requestHash !== input.requestHash) throw new WikiGenerationError('IDEMPOTENCY_CONFLICT');
         return this.read(input.repository, prior.jobId)!;
+      }
+      let restored: WikiGenerationJob | undefined;
+      let durable: WikiGenerationCheckpoint | undefined;
+      if (input.resumeJobId) {
+        restored = this.read(input.repository, input.resumeJobId);
+        if (!restored || JSON.stringify(restored.scope) !== JSON.stringify(input.scope)) throw new WikiGenerationError('RESUME_UNAVAILABLE');
+        durable = input.repository.checkpoint?.(restored.jobId);
+        if (restored.state === 'completed' || durable?.resumeKeys.includes(input.idempotencyKey)) return restored;
+        if (active(restored) || this.running.has(restored.jobId)) throw new WikiGenerationError('CAPACITY_EXCEEDED');
+        if (!durable || !restored.resumable || durable.resumeKeys.length >= 20) throw new WikiGenerationError('RESUME_UNAVAILABLE');
+        if (restored.requestHash !== input.requestHash) throw new WikiGenerationError('MODEL_CHANGED');
+        if (durable.inputHash !== input.checkpointHash || JSON.stringify(durable.batchChunks) !== JSON.stringify(batchChunks)) throw new WikiGenerationError('SOURCE_CHANGED');
+        durable.resumeKeys.push(input.idempotencyKey);
       }
       for (const stored of input.repository.list()) {
         const job = this.read(input.repository, stored.jobId)!;
         if (active(job)) throw new WikiGenerationError('CAPACITY_EXCEEDED');
       }
       const now = new Date().toISOString();
-      const job: WikiGenerationJob = { schemaVersion: 1, jobId: `wj-${randomUUID()}`, scope: input.scope,
+      const job: WikiGenerationJob = restored ?? { schemaVersion: 1, jobId: `wj-${randomUUID()}`, scope: input.scope,
         idempotencyKey: input.idempotencyKey, requestHash: input.requestHash, state: 'queued',
         sources: input.sources, totalChunks: input.totalChunks, processedChunks: 0, pageIds: [], errorCode: null,
+        progress: { phase: 'queued', batchIndex: 0, batchCount: batchChunks.length },
         createdAt: now, updatedAt: now };
-      input.repository.save(job);
+      if (!durable && input.checkpointHash && input.repository.checkpoint) durable = {
+        schemaVersion: 1, inputHash: input.checkpointHash, batchChunks, batches: [], resumeKeys: [],
+      };
+      job.state = 'queued'; job.errorCode = null; job.updatedAt = now;
+      job.attemptStartedAt = now;
+      job.progress = { phase: 'queued', batchIndex: durable?.batches.length ?? 0, batchCount: batchChunks.length };
+      job.resumable = !!durable && durable.resumeKeys.length < 20;
+      if (durable) job.processedChunks = batchChunks.slice(0, durable.batches.length).reduce((a, b) => a + b, 0);
+      input.repository.save(job, durable);
       const controller = new AbortController(); this.running.set(job.jobId, controller);
-      const checkpoint = () => { job.updatedAt = new Date().toISOString(); input.repository.save(job); };
+      const checkpoint = () => { job.updatedAt = new Date().toISOString(); input.repository.save(job, durable); };
       const work = this.dispatcher.dispatch({ runId: job.jobId, orgId: job.scope.orgId, userId: job.scope.userId,
         sessionId: `wiki:${job.scope.knowledgeBaseId}`, kind: 'project-task', priority: 'normal', signal: controller.signal,
         execute: async () => {
           controller.signal.throwIfAborted(); job.state = 'running'; checkpoint();
-          const batches: WikiGeneratedPage[][] = [];
-          for (let index = 0; index < batchChunks.length; index++) {
+          const batches: WikiGeneratedPage[][] = durable?.batches ?? [];
+          for (let index = batches.length; index < batchChunks.length; index++) {
             controller.signal.throwIfAborted();
-            batches.push(await input.generate(controller.signal, index));
+            job.progress = { phase: 'generate', batchIndex: index + 1, batchCount: batchChunks.length }; checkpoint();
+            const generated = await input.generate(controller.signal, index);
             controller.signal.throwIfAborted();
+            batches.push(generated);
             job.processedChunks += batchChunks[index]; checkpoint();
           }
-          const pages = input.merge ? input.merge(batches) : batches[0];
+          job.progress!.phase = 'merge'; checkpoint();
+          const pages = durable?.merged ?? (input.merge ? input.merge(batches) : batches[0]);
+          if (durable) { durable.merged = pages; checkpoint(); }
           controller.signal.throwIfAborted();
           job.processedChunks = job.totalChunks;
+          job.progress!.phase = 'save'; checkpoint();
           for (const page of pages) {
             controller.signal.throwIfAborted();
             input.savePage({ ...page, content: { ...page.content, links: [] } }, job.jobId, false);
-            job.pageIds.push(page.pageId); checkpoint();
+            if (!job.pageIds.includes(page.pageId)) job.pageIds.push(page.pageId);
+            checkpoint();
           }
+          job.progress!.phase = 'link'; checkpoint();
           for (const page of pages.filter((p) => p.content.links.length)) {
             controller.signal.throwIfAborted(); input.savePage(page, job.jobId, true); checkpoint();
           }
-          job.state = 'completed'; checkpoint();
+          job.state = 'completed'; job.progress!.phase = 'done'; job.resumable = false;
+          if (durable) { durable.batches = []; delete durable.merged; }
+          checkpoint();
         },
       }).catch((error: unknown) => {
         job.state = controller.signal.aborted ? 'cancelled' : job.pageIds.length ? 'partial' : 'failed';

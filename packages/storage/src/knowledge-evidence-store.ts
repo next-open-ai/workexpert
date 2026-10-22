@@ -9,6 +9,7 @@ import {
 import { knowledgeTokens } from './knowledge-tokenizer.js';
 import { KnowledgeWikiStore, migrateWiki, invalidateWikiSearch, type WikiSourceAuthorizer } from './knowledge-wiki-store.js';
 import { WikiScopeSchema, WikiGenerationJobSchema, type WikiScope, type WikiGenerationJob } from '@workexpert/contracts';
+import { WikiGenerationCheckpointSchema, type WikiGenerationCheckpoint } from '@workexpert/contracts';
 
 export class KnowledgeEvidenceStoreError extends Error {
   constructor(public readonly code: 'CONFLICT' | 'NOT_FOUND' | 'INVALID_BATCH' | 'UNSUPPORTED_SCHEMA' | 'FULLTEXT_INDEX_FAILED', message: string) {
@@ -388,25 +389,36 @@ export class KnowledgeEvidenceStore {
   wikiJobs(scope: WikiScope): WikiGenerationJob[] {
     if (Number(this.db.prepare('PRAGMA user_version').get()!.user_version) < 6) return [];
     const key = JSON.stringify(WikiScopeSchema.parse(scope));
-    return this.db.prepare('SELECT payload FROM wiki_generation_jobs WHERE scope=? ORDER BY rowid DESC LIMIT 100')
+    return this.db.prepare(`SELECT json_remove(payload, '$._checkpoint') AS payload FROM wiki_generation_jobs WHERE scope=?
+      ORDER BY CASE WHEN json_extract(payload, '$.state') IN ('queued','running') THEN 0 ELSE 1 END,
+      json_extract(payload, '$.updatedAt') DESC, rowid DESC LIMIT 100`)
       .all(key).map((row) => WikiGenerationJobSchema.parse(JSON.parse(String(row.payload))));
   }
 
   wikiJob(scope: WikiScope, jobId: string, byKey = false): WikiGenerationJob | undefined {
     if (Number(this.db.prepare('PRAGMA user_version').get()!.user_version) < 6) return undefined;
-    const row = this.db.prepare(`SELECT payload FROM wiki_generation_jobs WHERE scope=? AND ${byKey ? 'idempotency_key' : 'job_id'}=?`)
+    const row = this.db.prepare(`SELECT json_remove(payload, '$._checkpoint') AS payload FROM wiki_generation_jobs WHERE scope=? AND ${byKey ? 'idempotency_key' : 'job_id'}=?`)
       .get(JSON.stringify(WikiScopeSchema.parse(scope)), jobId);
     return row ? WikiGenerationJobSchema.parse(JSON.parse(String(row.payload))) : undefined;
   }
 
-  saveWikiJob(input: WikiGenerationJob): void {
+  wikiCheckpoint(scope: WikiScope, jobId: string): WikiGenerationCheckpoint | undefined {
+    if (Number(this.db.prepare('PRAGMA user_version').get()!.user_version) < 6) return;
+    const row = this.db.prepare("SELECT json_extract(payload, '$._checkpoint') AS checkpoint FROM wiki_generation_jobs WHERE scope=? AND job_id=?")
+      .get(JSON.stringify(WikiScopeSchema.parse(scope)), jobId);
+    return row?.checkpoint ? WikiGenerationCheckpointSchema.parse(JSON.parse(String(row.checkpoint))) : undefined;
+  }
+
+  saveWikiJob(input: WikiGenerationJob, checkpoint?: WikiGenerationCheckpoint): void {
     const job = WikiGenerationJobSchema.parse(input);
     const existing = this.wikiJob(job.scope, job.jobId);
     if (existing && (existing.requestHash !== job.requestHash || existing.idempotencyKey !== job.idempotencyKey)) {
       fail('CONFLICT', 'Immutable job identity changed');
     }
+    const saved = checkpoint ?? this.wikiCheckpoint(job.scope, job.jobId);
+    const payload = saved ? { ...job, _checkpoint: WikiGenerationCheckpointSchema.parse(saved) } : job;
     this.db.prepare(`INSERT INTO wiki_generation_jobs(job_id,scope,idempotency_key,payload) VALUES(?,?,?,?)
       ON CONFLICT(job_id) DO UPDATE SET payload=excluded.payload WHERE wiki_generation_jobs.scope=excluded.scope`)
-      .run(job.jobId, JSON.stringify(job.scope), job.idempotencyKey, JSON.stringify(job));
+      .run(job.jobId, JSON.stringify(job.scope), job.idempotencyKey, JSON.stringify(payload));
   }
 }

@@ -20,6 +20,7 @@ export function wikiGenerationFailureCode(error: unknown): z.infer<typeof WikiGe
 export const WikiGenerationRequestSchema = z.object({
   documentIds: z.array(id).min(1).max(5).refine((ids) => new Set(ids).size === ids.length),
   model: z.lazy(() => ModelConfigSchema), idempotencyKey: z.string().min(1).max(128),
+  resumeJobId: id.optional(),
 }).strict();
 export type WikiGenerationRequest = z.infer<typeof WikiGenerationRequestSchema>;
 export const WikiGenerationInputSchema = z.object({
@@ -50,6 +51,17 @@ export const WikiGeneratedPageSchema = z.object({
   pageId: id, slug: z.string().min(1).max(200), content: WikiContentSchema,
 }).strict();
 export type WikiGeneratedPage = z.infer<typeof WikiGeneratedPageSchema>;
+/** Server-only durable candidates. Never include in public job responses. */
+export const WikiGenerationCheckpointSchema = z.object({
+  schemaVersion: z.literal(1), inputHash: z.string().regex(/^[a-f0-9]{64}$/),
+  batchChunks: z.array(z.number().int().min(1).max(100)).min(1).max(8),
+  batches: z.array(z.array(WikiGeneratedPageSchema).min(1).max(8)).max(8),
+  merged: z.array(WikiGeneratedPageSchema).min(1).max(64).optional(),
+  resumeKeys: z.array(z.string().min(1).max(128)).max(20),
+}).strict().refine((value) => value.batches.length <= value.batchChunks.length
+  && (!value.merged || value.batches.length === value.batchChunks.length)
+  && JSON.stringify(value).length <= 16 * 1024 * 1024);
+export type WikiGenerationCheckpoint = z.infer<typeof WikiGenerationCheckpointSchema>;
 export const WikiGenerationJobSchema = z.object({
   schemaVersion: z.literal(1), jobId: id, scope: WikiScopeSchema,
   idempotencyKey: z.string().min(1).max(128), requestHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -57,6 +69,12 @@ export const WikiGenerationJobSchema = z.object({
   sources: z.array(z.object({ documentId: id, documentVersionId: id, processingRevisionId: id }).strict()).min(1).max(5),
   totalChunks: z.number().int().min(1).max(400), processedChunks: z.number().int().min(0).max(400),
   pageIds: z.array(id).max(64), errorCode: z.string().max(80).nullable(),
+  resumable: z.boolean().optional(),
+  attemptStartedAt: z.string().datetime().optional(),
+  progress: z.object({
+    phase: z.enum(['queued', 'generate', 'merge', 'save', 'link', 'done']),
+    batchIndex: z.number().int().min(0).max(8), batchCount: z.number().int().min(1).max(8),
+  }).strict().refine((value) => value.batchIndex <= value.batchCount).optional(),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
 }).strict();
 export type WikiGenerationJob = z.infer<typeof WikiGenerationJobSchema>;
