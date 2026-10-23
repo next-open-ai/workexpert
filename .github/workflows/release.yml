@@ -34,7 +34,8 @@ jobs:
             artifact: macos-arm64
             arch: arm64
             expected_extension: dmg
-            max_package_mb: 200
+            # Include the required LanceDB native binding; retain a hard size gate.
+            max_package_mb: 250
           # macOS Intel（macos-13）暂时停用：GitHub 托管 runner 经常长时间排队。
           # 恢复时同时把发布阶段的资产数量校验改回 3。
           # - os: macos-13

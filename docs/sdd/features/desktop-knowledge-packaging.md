@@ -5,6 +5,7 @@
 - DK-R01 / DK-T01：API 依赖收集包含当前平台已安装的 optionalDependencies；必需依赖缺失仍失败。不携带其他 OS/CPU 的原生包。
 - DK-R02 / DK-T02：每次 stage 后在仓库之外验证依赖闭包，真实执行 LanceDB 建表、写入、更新与向量召回；失败阻止生成安装器。
 - DK-R03 / DK-T03：入库因 LanceDB 组件缺失或加载不兼容失败，提供修复安装包提示，不误导反复重试或更换 embedding。保留原文和异常 cause，不静默降级为成功。
+- DK-R04 / DK-T04：macOS ARM64 安装器体积预算从 200 MB 调整为 250 MB，容纳必需原生组件；保留超限失败门禁，其他平台预算不变。无数据迁移，回退仅需恢复该配置。
 
 ## 契约与兼容
 
@@ -33,3 +34,4 @@ DK-T01～03 已实现并通过下列本机回归（2026-10-22，macOS arm64 / No
 - 根目录执行 `node_modules/.bin/tsc -p apps/desktop/tsconfig.json --noEmit`、`node_modules/.bin/tsc -p apps/api/tsconfig.json --noEmit`、`git diff --check`：通过。
 - `pnpm --filter @workexpert/desktop test` 因 Corepack 等待下载 pnpm 未完成，已终止本次进程；上面直接执行同一 Node 测试入口完成验证，无需下载新依赖。
 - 未执行：完整 DMG/EXE 构建、安装后真机 UI 回归、Windows 原生运行。原因：本次为代码修复与本机依赖闭包验收，未发布安装器；Windows 由原生 release runner 的 stage 同步执行强制隔离校验。
+- DK-T04（2026-10-23）：临时稀疏 DMG 文件调用真实 `report-package-size.mjs` 验证 4/4 通过：227.1 MB 在旧 200 MB 预算失败、在新 250 MB 预算通过；250 MB 边界通过、多 1 字节失败。`git diff --check` 通过。本次未推送、触发 Actions 或重新生成安装器；配置提交到待发布 ref 后生效。
