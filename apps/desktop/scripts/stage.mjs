@@ -2,13 +2,15 @@ import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { copyDereferenced, stageProductionDependencies } from './stage-dependencies.mjs';
+import { copyDereferenced, stageProductionDependencies, directoryBytes } from './stage-dependencies.mjs';
 import { verifyStagedKnowledge } from './verify-staged-knowledge.mjs';
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appsRoot = path.resolve(desktopRoot, '..');
 const projectRoot = path.resolve(appsRoot, '..');
 const stageRoot = path.join(desktopRoot, 'stage');
+const started = Date.now();
+console.log(`[stage] started ${new Date().toISOString()} platform=${process.platform} arch=${process.arch} node=${process.versions.node}`);
 const runtimeRoot = path.join(projectRoot, 'runtimes', 'agentscope-runtime');
 const sqlJsDist = path.dirname(createRequire(path.join(desktopRoot, 'package.json')).resolve('sql.js/dist/sql-wasm.js'));
 const sources = [
@@ -20,6 +22,7 @@ rmSync(stageRoot, { recursive: true, force: true });
 for (const source of sources) {
   if (!existsSync(source.from)) throw new Error(`Missing build output: ${source.from}`);
   cpSync(source.from, source.to, { recursive: true, dereference: true });
+  console.log(`[stage] copied ${path.basename(source.to)}: ${(directoryBytes(source.to) / 1_000_000).toFixed(2)} MB`);
 }
 mkdirSync(path.join(stageRoot, 'sqljs'), { recursive: true });
 for (const file of ['sql-wasm.js', 'sql-wasm.wasm']) cpSync(path.join(sqlJsDist, file), path.join(stageRoot, 'sqljs', file));
@@ -33,7 +36,10 @@ cpSync(apiPackageJson, path.join(stageRoot, 'api', 'package.json'));
 // Electron Builder must never follow pnpm workspace links into the repository
 // root. Stage the API's production dependency closure explicitly instead.
 const stagedDeps = path.join(stageRoot, 'api', 'node_deps');
-console.log(`Staged ${stageProductionDependencies(apiPackageJson, stagedDeps)} API production packages.`);
+console.log(`Staged ${stageProductionDependencies(apiPackageJson, stagedDeps, {
+  onPackage: ({ name, bytes }) => console.log(`[stage:dependency] ${name} ${(bytes / 1_000_000).toFixed(2)} MB`),
+})} API production packages.`);
+console.log(`[stage] verifying isolated local knowledge runtime after ${Date.now() - started}ms`);
 console.log(verifyStagedKnowledge(stagedDeps));
 
 const stagedRuntime = path.join(stageRoot, 'agentscope-runtime');
@@ -44,3 +50,7 @@ for (const entry of ['src', 'pyproject.toml', 'requirements.txt', 'python']) {
   copyDereferenced(source, path.join(stagedRuntime, entry));
 }
 console.log(`Staged AgentScope runtime from ${runtimeRoot}.`);
+for (const name of ['api', 'renderer', 'agentscope-runtime']) {
+  console.log(`[stage:summary] ${name} ${(directoryBytes(path.join(stageRoot, name)) / 1_000_000).toFixed(2)} MB`);
+}
+console.log(`[stage] completed in ${Date.now() - started}ms`);

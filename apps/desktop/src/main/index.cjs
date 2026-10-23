@@ -5,6 +5,13 @@ const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const { homedir, tmpdir } = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { createRuntimeLog, attachChildLog, errorDetails, registerRuntimeLogIpc } = require('./runtime-log.cjs');
+const runtimeLog = createRuntimeLog(app.getPath('logs'), { settingsFile: path.join(app.getPath('userData'), 'diagnostics.json') });
+runtimeLog.write('desktop', 'info', 'app.started', {
+  version: app.getVersion(), platform: process.platform, arch: process.arch, packaged: app.isPackaged,
+  electron: process.versions.electron, node: process.versions.node, pid: process.pid,
+});
+process.on('uncaughtExceptionMonitor', (error) => runtimeLog.write('desktop', 'error', 'app.uncaught-exception', errorDetails(error)));
 const wikiSnapshotDirectories = new Set();
 const wikiReaderWindows = new Set();
 app.once('will-quit', () => {
@@ -127,6 +134,13 @@ function installApplicationMenu() {
       ],
     },
     {
+      label: '帮助',
+      submenu: [
+        { label: '查看运行日志', click: () => openRuntimeLogs(false) },
+        { label: '打开日志文件夹', click: () => openRuntimeLogs(true) },
+      ],
+    },
+    {
       label: '窗口',
       submenu: [
         { role: 'minimize' },
@@ -143,6 +157,19 @@ function installApplicationMenu() {
       : []),
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+async function openRuntimeLogs(directory) {
+  if (!existsSync(directory ? runtimeLog.directory : runtimeLog.file)) {
+    dialog.showMessageBoxSync({ type: 'info', title: '暂无运行日志', message: '暂无运行日志', detail: '开启“设置 → 通用 → 运行日志”后，系统会开始记录诊断信息。' });
+    return;
+  }
+  try {
+    const failure = await shell.openPath(directory ? runtimeLog.directory : runtimeLog.file);
+    if (failure) throw new Error('Unable to open log');
+  } catch {
+    dialog.showErrorBox('无法打开运行日志', '请检查日志目录是否可访问，或稍后重试。');
+  }
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -1310,6 +1337,7 @@ function resolveApiExec() {
 function startApi() {
   const entry = apiEntry();
   if (!existsSync(entry)) {
+    runtimeLog.write('desktop', 'error', 'api.entry-missing');
     console.error(`[api] entry missing: ${entry}`);
     return;
   }
@@ -1365,8 +1393,10 @@ function spawnApiProcess(entry) {
   // spawn(+ipc) instead of fork(): more reliable under Electron main on macOS.
   apiProcess = spawn(execPath, [entry], {
     env: childEnv,
-    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+    stdio: ['inherit', 'pipe', 'pipe', 'ipc'],
   });
+  attachChildLog(apiProcess, runtimeLog, 'api', { mirror: !app.isPackaged });
+  runtimeLog.write('desktop', 'info', 'api.spawned', { pid: apiProcess.pid, port: apiPort });
   console.log(`[api] spawned pid=${apiProcess.pid ?? 'null'} exec=${execPath} entry=${entry}`);
   // M0 keyring: the child requests a decrypted snapshot of model and
   // search provider settings over the fork IPC channel. Never persisted.
@@ -1379,9 +1409,11 @@ function spawnApiProcess(entry) {
     pushSecretsToApi();
   });
   apiProcess.on('error', (error) => {
+    runtimeLog.write('desktop', 'error', 'api.spawn-failed', errorDetails(error));
     console.warn('[api] process error:', error instanceof Error ? error.message : String(error));
   });
   apiProcess.on('exit', (code, signal) => {
+    runtimeLog.write('desktop', 'warn', 'api.exited', { exitCode: code, signal });
     clearApiSecretPushTimers();
     console.warn(`[api] process exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
   });
@@ -1439,12 +1471,14 @@ async function waitForApi(timeoutMs = 30_000) {
     try {
       const response = await fetch(`http://127.0.0.1:${apiPort}/api/health`);
       if (response.ok) {
+        runtimeLog.write('desktop', 'info', 'api.ready', { durationMs: Date.now() - started, attempt });
         if (attempt > 1) console.log(`[api] ready after ${Date.now() - started}ms (${attempt} probes)`);
         return;
       }
     } catch (_) { /* retry */ }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+  runtimeLog.write('desktop', 'error', 'api.readiness-timeout', { durationMs: Date.now() - started, attempt });
   throw new Error(`WorkExpert local API did not become ready within ${timeoutMs}ms.`);
 }
 
@@ -1529,6 +1563,7 @@ async function createWindow() {
   });
   let rendererRetry = 0;
   mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedUrl) => {
+    runtimeLog.write('renderer', 'error', 'renderer.load-failed', { errorCode: String(code) });
     console.error(`[renderer] failed to load (${code}): ${description} (${validatedUrl})`);
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (rendererRetry >= 20) return;
@@ -1540,9 +1575,15 @@ async function createWindow() {
     }, 400);
   });
   mainWindow.webContents.on('console-message', (_event, details) => {
+    if (details.level >= 2) runtimeLog.write('renderer', 'error', 'renderer.console-error', { line: details.lineNumber });
     if (details.level >= 2) console.error(`[renderer] ${details.sourceId}:${details.lineNumber} ${details.message}`);
   });
-  mainWindow.webContents.on('render-process-gone', (_event, details) => console.error(`[renderer] process gone: ${details.reason}`));
+  mainWindow.webContents.on('did-finish-load', () => runtimeLog.write('renderer', 'info', 'renderer.ready'));
+  mainWindow.webContents.on('preload-error', (_event, _preloadPath, error) => runtimeLog.write('renderer', 'error', 'renderer.preload-failed', errorDetails(error)));
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    runtimeLog.write('renderer', 'error', 'renderer.process-gone', { reason: details.reason });
+    console.error(`[renderer] process gone: ${details.reason}`);
+  });
   const rendererUrl = process.env.WORKEXPERT_RENDERER_URL;
   try {
     if (rendererUrl) {
@@ -1805,8 +1846,10 @@ async function runEnvironmentChecks(onProgress) {
 }
 
 app.whenReady().then(async () => {
+  runtimeLog.write('desktop', 'info', 'app.ready');
   if (!hasSingleInstanceLock) return;
   installApplicationMenu();
+  registerRuntimeLogIpc(ipcMain, { logger: runtimeLog, getWindow: () => mainWindow, openLogs: openRuntimeLogs });
   protocol.handle('workexpert-preview', async (request) => {
     try {
       const url = new URL(request.url);
@@ -1980,6 +2023,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' || isDevShell) quitApp('window-all-closed');
 });
 app.on('before-quit', () => {
+  runtimeLog.write('desktop', 'info', 'app.quitting');
   isQuitting = true;
   stopSidecarProcess();
   apiProcess?.kill('SIGTERM');

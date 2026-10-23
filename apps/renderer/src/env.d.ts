@@ -2,6 +2,9 @@
 
 interface Window {
   workexpertDesktop?: {
+    getRuntimeLogSettings(): Promise<import('@workexpert/contracts').RuntimeLogSettings>;
+    setRuntimeLogEnabled(enabled: boolean): Promise<import('@workexpert/contracts').RuntimeLogSettings>;
+    openRuntimeLogs(directory?: boolean): Promise<void>;
     pickSkill(): Promise<{ path: string; content: string } | null>;
     pickProjectDirectory(): Promise<string | null>;
     createProjectWorkspace(value: { name: string; parentDirectory?: string }): Promise<string>;

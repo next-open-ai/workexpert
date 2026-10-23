@@ -29,7 +29,15 @@ function resolvePackageDir(name, resolver) {
   }
 }
 
-export function stageProductionDependencies(manifestPath, destination) {
+export function directoryBytes(target) {
+  const stat = lstatSync(target);
+  if (stat.isSymbolicLink()) return 0;
+  return stat.isDirectory()
+    ? readdirSync(target).reduce((sum, entry) => sum + directoryBytes(path.join(target, entry)), 0)
+    : stat.size;
+}
+
+export function stageProductionDependencies(manifestPath, destination, { onPackage = () => {} } = {}) {
   const seen = new Set();
   function stageDependency(name, resolver, optional = false) {
     if (seen.has(name) || name.startsWith('@workexpert/') || name.startsWith('@types/')) return;
@@ -52,6 +60,7 @@ export function stageProductionDependencies(manifestPath, destination) {
       cpSync(path.join(source, 'package.json'), path.join(target, 'package.json'));
       for (const file of ['sql-wasm.js', 'sql-wasm.wasm']) cpSync(path.join(source, 'dist', file), path.join(target, 'dist', file));
     } else copyDereferenced(source, target);
+    onPackage({ name, bytes: directoryBytes(target) });
   }
   function stageManifest(manifest, resolver) {
     const optional = manifest.optionalDependencies ?? {};

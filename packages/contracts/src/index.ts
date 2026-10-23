@@ -781,3 +781,4 @@ export * from './voice-asr.js';
 export * from './knowledge-wiki.js';
 export * from './wiki-generation.js';
 export * from './retrieval-evaluation.js';
+export * from './desktop-diagnostics.js';

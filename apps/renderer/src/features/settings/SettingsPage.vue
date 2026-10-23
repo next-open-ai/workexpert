@@ -8,6 +8,7 @@ import type { AuthUser } from '../../services/auth';
 import { employeeDisplayName } from '../../app/employees';
 import ProviderInstancesEditor from './ProviderInstancesEditor.vue';
 import EnvironmentSettingsCard from './EnvironmentSettingsCard.vue';
+import RuntimeLogSettingsCard from './RuntimeLogSettingsCard.vue';
 import ConfiguredModelsEditor from './ConfiguredModelsEditor.vue';
 import LocalEmbeddingSettingsCard from './LocalEmbeddingSettingsCard.vue';
 import UsageStatsPanel from './UsageStatsPanel.vue';
@@ -796,6 +797,7 @@ function handleDefaultEmployeeChange(event: Event) {
           <option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employeeDisplayName(employee, t) }}</option>
         </select>
       </label>
+      <RuntimeLogSettingsCard />
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>

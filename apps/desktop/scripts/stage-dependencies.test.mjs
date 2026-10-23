@@ -29,7 +29,10 @@ test('DK-T01: optional native dependencies are included recursively, absent/wron
   f.dependency('native', { os: [process.platform], cpu: [process.arch], dependencies: { child: '1' } });
   f.dependency('child');
   f.dependency('foreign', { os: [`!${process.platform}`] });
-  assert.equal(stageProductionDependencies(f.manifestPath, f.destination), 3);
+  const staged = [];
+  assert.equal(stageProductionDependencies(f.manifestPath, f.destination, { onPackage: (row) => staged.push(row) }), 3);
+  assert.deepEqual(staged.map((row) => row.name).sort(), ['child', 'engine', 'native']);
+  assert.ok(staged.every((row) => row.bytes > 0));
   assert.ok(existsSync(path.join(f.destination, 'native', 'index.cjs')));
   assert.ok(existsSync(path.join(f.destination, 'child', 'index.cjs')));
   assert.equal(existsSync(path.join(f.destination, 'foreign')), false);

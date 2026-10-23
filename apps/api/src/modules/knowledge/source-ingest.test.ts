@@ -122,7 +122,8 @@ test('DK-T03: component failure reaches UI with stable code and retained origina
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workexpert-component-error-'));
   const principal = { orgId: 'org', userId: 'alice' };
   new KnowledgeCatalog(root).save(principal, [{ id: 'kb', name: 'Knowledge', provider: 'lancedb' }]);
-  const app = Fastify();
+  const diagnosticLogs: string[] = [];
+  const app = Fastify({ logger: { stream: { write: (line: string) => { diagnosticLogs.push(line); } } } });
   const message = '当前安装包的本地检索组件缺失或不兼容，请安装修复版本后重试。';
   app.addHook('preHandler', async (request) => {
     request.auth = { ...principal, username: 'alice', displayName: 'Alice', role: 'member', sessionId: 'test' };
@@ -131,7 +132,7 @@ test('DK-T03: component failure reaches UI with stable code and retained origina
     dataRoot: () => root,
     identifyVersion: (_scope, bytes) => ({ sourceHash: createHash('sha256').update(bytes).digest('hex'),
       documentVersionId: 'dv-' + createHash('sha256').update(bytes).digest('hex') }),
-    ingest: async () => { throw Object.assign(new Error(message, { cause: new Error('/private/native/path') }), {
+    ingest: async () => { throw Object.assign(new Error(message, { cause: Object.assign(new Error('/private/native/path'), { code: 'MODULE_NOT_FOUND' }) }), {
       code: 'KNOWLEDGE_STORAGE_COMPONENT_UNAVAILABLE',
     }); },
     readAsset: async () => { throw new Error('Not used'); },
@@ -144,6 +145,10 @@ test('DK-T03: component failure reaches UI with stable code and retained origina
     assert.equal(response.json().code, 'KNOWLEDGE_STORAGE_COMPONENT_UNAVAILABLE');
     assert.equal(response.json().message, message);
     assert.doesNotMatch(response.body, /private\/native/);
+    const failure = diagnosticLogs.map((line) => JSON.parse(line)).find((row) => row.msg === 'knowledge.ingest.failed');
+    assert.equal(failure.code, 'KNOWLEDGE_STORAGE_COMPONENT_UNAVAILABLE');
+    assert.equal(failure.causeCode, 'MODULE_NOT_FOUND');
+    assert.doesNotMatch(JSON.stringify(failure), /原文保留|private\/native/);
     const original = await app.inject({ method: 'GET', url: `/knowledge/sources/${response.json().sourceSnapshot.documentVersionId}` });
     assert.equal(original.statusCode, 200);
     assert.equal(original.body, '原文保留');

@@ -86,6 +86,10 @@ export function registerSourceIngest(app: FastifyInstance, dependencies: {
     } catch (error) {
       if (error instanceof KnowledgeAccessError) return sendKnowledgeAccessError(reply, error);
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : undefined;
+      const cause = error instanceof Error ? error.cause : undefined;
+      const causeCode = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : undefined;
+      // Diagnose packaged runtime failures without logging document/model content.
+      request.log.error({ code, causeCode }, 'knowledge.ingest.failed');
       const message = code === 'CONFLICT'
         ? '文档在处理期间已发生变化，本次结果未发布。请刷新后重试。'
         : error instanceof Error ? error.message : 'Ingest failed.';

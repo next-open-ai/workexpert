@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('workexpertDesktop', {
+  getRuntimeLogSettings: () => ipcRenderer.invoke('workexpert:get-runtime-log-settings'),
+  setRuntimeLogEnabled: (enabled) => ipcRenderer.invoke('workexpert:set-runtime-log-enabled', enabled),
+  openRuntimeLogs: (directory = false) => ipcRenderer.invoke('workexpert:open-runtime-logs', directory),
   pickFile: () => ipcRenderer.invoke('workexpert:pick-file'),
   pickProjectDirectory: () => ipcRenderer.invoke('workexpert:pick-project-directory'),
   createProjectWorkspace: (value) => ipcRenderer.invoke('workexpert:create-project-workspace', value),
