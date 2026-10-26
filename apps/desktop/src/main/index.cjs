@@ -1385,7 +1385,7 @@ function spawnApiProcess(entry) {
     ...(process.env.WORKEXPERT_PYTHON ? { WORKEXPERT_PYTHON: process.env.WORKEXPERT_PYTHON } : {}),
     // The API is unpacked under Resources together with its minimal
     // production dependency closure, not the desktop workspace node_modules.
-    ...(app.isPackaged ? { NODE_PATH: path.join(process.resourcesPath, 'api', 'node_deps') } : {}),
+    ...(app.isPackaged ? { NODE_PATH: path.join(process.resourcesPath, 'api', 'node_modules') } : {}),
   });
   if (electronAsNode) childEnv.ELECTRON_RUN_AS_NODE = '1';
   else delete childEnv.ELECTRON_RUN_AS_NODE;

@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { stageProductionDependencies, supportsPlatform } from './stage-dependencies.mjs';
 import { verifyStagedKnowledge } from './verify-staged-knowledge.mjs';
 
@@ -52,12 +54,29 @@ test('DK-T01: absent required dependencies and broken optional dependency closur
 test('DK-T02: shipped API closure works outside workspace; removing native binding fails', { timeout: 120_000 }, (t) => {
   const f = fixture(t);
   const apiManifest = fileURLToPath(new URL('../../api/package.json', import.meta.url));
-  assert.ok(stageProductionDependencies(apiManifest, f.destination) > 0);
-  assert.match(verifyStagedKnowledge(f.destination), /write\/update\/recall: OK/);
-  const lanceManifest = JSON.parse(readFileSync(path.join(f.destination, '@lancedb/lancedb/package.json'), 'utf8'));
+  const api = path.join(f.root, 'staged-api');
+  const dependencies = path.join(api, 'node_modules');
+  assert.ok(stageProductionDependencies(apiManifest, dependencies) > 0);
+  assert.match(verifyStagedKnowledge(api), /Electron .* ESM import.*write\/update\/recall: OK/);
+  const lanceManifest = JSON.parse(readFileSync(path.join(dependencies, '@lancedb/lancedb/package.json'), 'utf8'));
   for (const name of Object.keys(lanceManifest.optionalDependencies)) {
-    const native = path.join(f.destination, name);
+    const native = path.join(dependencies, name);
     if (existsSync(native)) rmSync(native, { recursive: true, force: true });
   }
-  assert.throws(() => verifyStagedKnowledge(f.destination), /runtime is incomplete or incompatible/);
+  assert.throws(() => verifyStagedKnowledge(api), /runtime is incomplete or incompatible/);
+});
+
+test('DK-T05: reject legacy node_deps layout even when NODE_PATH lets require succeed', { timeout: 120_000 }, (t) => {
+  const f = fixture(t);
+  const api = path.join(f.root, 'legacy-api');
+  const dependencies = path.join(api, 'node_deps');
+  stageProductionDependencies(fileURLToPath(new URL('../../api/package.json', import.meta.url)), dependencies);
+  const executable = createRequire(import.meta.url)('electron');
+  const result = spawnSync(executable, ['-e', 'console.log(typeof require("@lancedb/lancedb").connect)'], {
+    cwd: api, env: { ...process.env, NODE_PATH: dependencies, NODE_OPTIONS: '', ELECTRON_RUN_AS_NODE: '1' },
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /function/);
+  assert.throws(() => verifyStagedKnowledge(api), /ERR_MODULE_NOT_FOUND/);
 });

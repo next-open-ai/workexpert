@@ -104,6 +104,10 @@ jobs:
         shell: bash
         run: |
           find apps/desktop/release -type f -name "*.${{ matrix.expected_extension }}" -print -quit | grep -q .
+      - name: Verify packaged Electron knowledge runtime
+        run: node apps/desktop/scripts/verify-packaged-knowledge.mjs apps/desktop/release
+      - name: Verify packaged knowledge import and recall
+        run: node scripts/packaged-knowledge-api-regression.mjs apps/desktop/release
       - name: Report and enforce package-size budget
         run: node scripts/report-package-size.mjs apps/desktop/release ${{ matrix.max_package_mb }}
       - name: Collect final installers only

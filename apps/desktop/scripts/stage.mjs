@@ -35,12 +35,15 @@ cpSync(apiPackageJson, path.join(stageRoot, 'api', 'package.json'));
 
 // Electron Builder must never follow pnpm workspace links into the repository
 // root. Stage the API's production dependency closure explicitly instead.
-const stagedDeps = path.join(stageRoot, 'api', 'node_deps');
+// ESM import() ignores NODE_PATH: external native packages must live in the
+// standard node_modules beside main.cjs, not a custom node_deps directory.
+const stagedApi = path.join(stageRoot, 'api');
+const stagedDeps = path.join(stagedApi, 'node_modules');
 console.log(`Staged ${stageProductionDependencies(apiPackageJson, stagedDeps, {
   onPackage: ({ name, bytes }) => console.log(`[stage:dependency] ${name} ${(bytes / 1_000_000).toFixed(2)} MB`),
 })} API production packages.`);
 console.log(`[stage] verifying isolated local knowledge runtime after ${Date.now() - started}ms`);
-console.log(verifyStagedKnowledge(stagedDeps));
+console.log(verifyStagedKnowledge(stagedApi));
 
 const stagedRuntime = path.join(stageRoot, 'agentscope-runtime');
 mkdirSync(stagedRuntime, { recursive: true });
