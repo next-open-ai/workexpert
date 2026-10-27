@@ -4,6 +4,8 @@
 
 > 状态：随实现演进维护；与 `README(.zh-CN)`、`docs/architecture/gateway-m*.md` 保持一致。
 > 目标读者：新成员快速建立全局观、评审人核对模块边界与数据流。
+> SDD 追踪：需求编号、边界契约、测试入口与实现映射见 [PAB-001 平台架构基线](../sdd/features/platform-architecture/README.md)；长期决策关系见 [ADR 决策体系分析](adr/analysis-2026-10-27.md)。
+> 图形视图：逻辑分层、控制/执行面、数据安全边界和部署网络见 [ADR 可视化附录](adr/diagrams.md)。
 
 ## 1. 产品定位与总览
 

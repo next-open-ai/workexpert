@@ -8,7 +8,7 @@
 
 | 编号 | 需求 | 验收标准 |
 | --- | --- | --- |
-| AMC-IMG-REQ-01 | Provider、能力和协议独立建模 | `image` 模型可显式保存协议；不新增 eSight 或生图专属 Provider 类型 |
+| AMC-IMG-REQ-01 | Provider、能力和协议独立建模 | `image` 模型可显式保存协议；不新增生图专属 Provider 类型 |
 | AMC-IMG-REQ-02 | 支持 OpenAI Images 兼容协议 | 调用 `/images/generations`，接受 URL 或 Base64 |
 | AMC-IMG-REQ-03 | 支持 DashScope 同步多模态协议 | 调用 `/api/v1/services/aigc/multimodal-generation/generation` 并解析多模态图片 URL |
 | AMC-IMG-REQ-04 | 支持 DashScope 异步文生图协议 | 提交 `image-synthesis`、读取 `task_id`、轮询 `/api/v1/tasks/{id}` |

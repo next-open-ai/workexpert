@@ -3,8 +3,10 @@ import { defineConfig } from 'vitepress'
 const architectureItems = [
   { text: '架构中心', link: '/architecture/README' },
   { text: '系统总览', link: '/architecture/system-overview' },
+  { text: 'ADR 可视化附录', link: '/architecture/adr/diagrams' },
   { text: '全局架构', link: '/architecture/architecture' },
   { text: 'ADR 索引', link: '/architecture/adr/README' },
+  { text: 'ADR 决策体系分析', link: '/architecture/adr/analysis-2026-10-27' },
   { text: '应用模型能力运行时', link: '/architecture/application-model-capability-runtime' },
   { text: '执行后端', link: '/architecture/execution-backend' },
   { text: '项目编排', link: '/architecture/project-orchestration' },
@@ -63,6 +65,7 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: 'SDD 索引', link: '/sdd/README' },
+          { text: 'PAB-001 · 平台架构基线', link: '/sdd/features/platform-architecture/README' },
           { text: 'WK · 证据驱动 Wiki（设计）', link: '/sdd/features/knowledge-wiki/README' },
           { text: 'UTI-001 · 统一 Tool Interface', link: '/sdd/features/unified-tool-interface/README' },
           { text: 'AMC-001 · 通用应用模型', link: '/sdd/features/application-model-capabilities/README' },

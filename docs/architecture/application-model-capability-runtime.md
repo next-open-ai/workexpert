@@ -6,7 +6,7 @@
 
 ## 1. 定位与目标
 
-应用模型（Capability Model）负责图片生成、Embedding、ASR、TTS、量子代码、有限问题决策等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
+应用模型（Capability Model）负责图片生成、Embedding、ASR、TTS、有限问题决策等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
 
 方案目标：
 
@@ -22,8 +22,8 @@
 | 概念 | 职责 |
 | --- | --- |
 | 主控模型 | 规划、Agent Loop、能力选择和结果综合 |
-| Capability Model Provider | 供应商连接、鉴权和模型目录，例如 OpenAI-compatible、DashScope、eSight |
-| Capability Model | 图片、Embedding、ASR、TTS、quantum-code 等模型实例 |
+| Capability Model Provider | 供应商连接、鉴权和模型目录，例如 OpenAI-compatible、DashScope |
+| Capability Model | 图片、Embedding、ASR、TTS、decision 等模型实例 |
 | Capability Router | 按员工开关、任务类型和绑定选择能力模型 |
 | Capability Backend | 参数归一、协议调用、异步轮询和产物处理 |
 | Unified Tool Interface | 跨执行引擎的目录、调用、结果和生命周期协议 |
@@ -47,7 +47,6 @@ Capability Backend                 ← 与执行引擎无关
   provider adapter · async poller · downloader · artifact writer
         ├── OpenAI-compatible
         ├── DashScope native
-        ├── eSight capability provider
         └── future adapters
         ▼
 Run Workspace / Artifact Registry
@@ -171,4 +170,4 @@ WorkExpert 已同步公共契约、统一 Tool Registry/Dispatcher、员工级�
 
 决策模型以 `decision` 应用模型能力登记：Provider 保存地址和密钥，模型目录保存模型 ID 与决策协议，决策守卫只保存启用、观察/强制、失败策略等使用策略并引用应用模型 ID。旧版独立 JEV 连接在加载时迁移为 Provider + 决策模型；运行开始时解析为不可变的 `DecisionRuntimeConfig`。JEV 是首个 `system-one-v1` Adapter，而不是配置域中的特殊模型类型。
 
-当前状态仍为“待验收”，不是“生产验证完成”。尚需使用真实供应商凭据执行图片、Embedding、ASR、TTS、eSight E2E，验证安装态 AgentScope/DSH 的细粒度进度与取消传播，并补齐统一 usage/成本展示及平台 Benchmark。
+当前状态仍为“待验收”，不是“生产验证完成”。尚需使用真实供应商凭据执行图片、Embedding、ASR、TTS E2E，验证安装态 AgentScope/DSH 的细粒度进度与取消传播，并补齐统一 usage/成本展示及平台 Benchmark。

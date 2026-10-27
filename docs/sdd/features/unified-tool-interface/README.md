@@ -37,7 +37,7 @@ ExecutionBackend
 
 ### 不包含
 
-- eSight、图片、Embedding、ASR、TTS 的供应商协议；
+- 图片、Embedding、ASR、TTS 的供应商协议；
 - 业务能力路由、模型绑定和模型计费；
 - Tool/MCP 业务实现重写；
 - 将所有工具强制转换为远程 MCP 服务。

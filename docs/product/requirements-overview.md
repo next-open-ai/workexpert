@@ -1,17 +1,17 @@
 # WorkExpert 项目需求规格总览
 
 > 状态：当前总览  
-> 更新日期：2026-09-23  
+> 更新日期：2026-10-27
 > 说明：本文件是项目级需求和评审导航，不替代功能 SDD 中的详细需求。
 
 ## 项目级需求
 
 | 编号 | 需求 | 详细入口 |
 | --- | --- | --- |
-| WM-REQ-001 | 支持多 Provider、多模型和可替换运行时。 | [全局架构](../architecture/architecture.md) |
+| WM-REQ-001 | 支持多 Provider、多模型和可替换运行时。 | [平台架构基线](../sdd/features/platform-architecture/README.md) |
 | WM-REQ-002 | 数字员工在职责、Skill、知识和权限边界内执行任务。 | 功能 SDD；[历史需求](../archive/legacy-global-sdd/requirements.md) |
 | WM-REQ-003 | 对话和项目任务可以调用受控工具并产生可追踪资产。 | [项目编排](../architecture/project-orchestration.md) |
-| WM-REQ-004 | Desktop、Web/API、消息通道共享稳定契约并具有明确降级行为。 | [运行形态](../guides/runtime-modes.md) |
+| WM-REQ-004 | Desktop、Web/API、消息通道共享稳定契约并具有明确降级行为。 | [平台架构基线](../sdd/features/platform-architecture/architecture.md)；[运行形态](../guides/runtime-modes.md) |
 | WM-REQ-005 | 需求、设计、任务、测试、Benchmark、阶段成果和发布结果可追溯。 | [SDD 工作流](../engineering/sdd-workflow.md) |
 
 ## 项目级质量属性
@@ -30,3 +30,5 @@
 ## 当前功能 SDD
 
 新跨模块功能必须在 `docs/sdd/features/<feature>/` 建立独立规格包。当前功能见 [SDD 索引](../sdd/README.md)，图片理解见 [VIS-001](../sdd/features/image-understanding/README.md)；既有历史规格见 [归档](../archive/legacy-global-sdd/README.md)。
+
+项目级边界已由 [PAB-001 平台架构基线](../sdd/features/platform-architecture/README.md) 逆向补全，并通过 [ADR 决策体系分析](../architecture/adr/analysis-2026-10-27.md) 关联长期决策、实现证据和验证入口。

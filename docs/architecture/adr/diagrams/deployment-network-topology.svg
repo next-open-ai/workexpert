@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">WorkExpert 部署网络拓扑</title><desc id="desc">桌面、本地 Web、容器和外部服务之间的网络连接。</desc>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L0 6L9 3z" fill="#475569"/></marker><style>.h{font:700 28px system-ui;fill:#172554}.t{font:700 17px system-ui;fill:#1e293b}.s{font:14px system-ui;fill:#475569}.box{fill:#fff;stroke-width:2;rx:14}.line{stroke:#475569;stroke-width:2.2;fill:none;marker-end:url(#a)}.both{marker-start:url(#a)}.dash{stroke-dasharray:8 6}.zone{stroke-width:2;rx:22}</style></defs>
+  <rect width="1400" height="820" fill="#f8fafc"/><text x="50" y="48" class="h">WorkExpert 部署网络拓扑</text>
+
+  <rect x="40" y="85" width="860" height="650" class="zone" fill="#eef6ff" stroke="#3b82f6"/><text x="65" y="118" class="t">用户设备 / 私有网络</text>
+  <rect x="80" y="145" width="360" height="245" class="zone" fill="#eef2ff" stroke="#6366f1"/><text x="105" y="176" class="t">Desktop 形态</text>
+  <rect x="115" y="205" width="130" height="55" class="box" stroke="#818cf8"/><text x="180" y="238" text-anchor="middle" class="s">Renderer</text>
+  <rect x="275" y="205" width="130" height="55" class="box" stroke="#818cf8"/><text x="340" y="228" text-anchor="middle" class="s">Main</text><text x="340" y="247" text-anchor="middle" class="s">safeStorage</text>
+  <rect x="115" y="300" width="130" height="55" class="box" stroke="#818cf8"/><text x="180" y="323" text-anchor="middle" class="s">API</text><text x="180" y="342" text-anchor="middle" class="s">127.0.0.1:50832</text>
+  <rect x="275" y="300" width="130" height="55" class="box" stroke="#818cf8"/><text x="340" y="323" text-anchor="middle" class="s">Gateway</text><text x="340" y="342" text-anchor="middle" class="s">fork / outbound</text>
+  <path d="M180 260V300" class="line"/><path d="M340 260V300" class="line"/>
+
+  <rect x="480" y="145" width="380" height="245" class="zone" fill="#ecfdf5" stroke="#10b981"/><text x="505" y="176" class="t">Web / Docker 形态</text>
+  <rect x="515" y="205" width="130" height="55" class="box" stroke="#34d399"/><text x="580" y="228" text-anchor="middle" class="s">Browser</text><text x="580" y="247" text-anchor="middle" class="s">HTTPS</text>
+  <rect x="695" y="205" width="130" height="55" class="box" stroke="#34d399"/><text x="760" y="228" text-anchor="middle" class="s">TLS Proxy</text><text x="760" y="247" text-anchor="middle" class="s">单一公网入口</text>
+  <rect x="600" y="300" width="150" height="55" class="box" stroke="#34d399"/><text x="675" y="323" text-anchor="middle" class="s">API + Static UI</text><text x="675" y="342" text-anchor="middle" class="s">容器/私网</text>
+  <path d="M645 232H695" class="line both"/><path d="M760 260L700 300" class="line"/>
+
+  <rect x="80" y="440" width="780" height="245" class="zone" fill="#fff7ed" stroke="#f97316"/><text x="105" y="472" class="t">本机运行与数据区（不直接公网暴露）</text>
+  <rect x="115" y="510" width="160" height="60" class="box" stroke="#fb923c"/><text x="195" y="536" text-anchor="middle" class="s">Orchestrator</text><text x="195" y="556" text-anchor="middle" class="s">Domain KV</text>
+  <rect x="310" y="510" width="160" height="60" class="box" stroke="#fb923c"/><text x="390" y="536" text-anchor="middle" class="s">Agent Core</text><text x="390" y="556" text-anchor="middle" class="s">Model / Tools</text>
+  <rect x="505" y="510" width="145" height="60" class="box" stroke="#fb923c"/><text x="577" y="536" text-anchor="middle" class="s">AgentScope</text><text x="577" y="556" text-anchor="middle" class="s">Sidecar Pool</text>
+  <rect x="685" y="510" width="135" height="60" class="box" stroke="#fb923c"/><text x="752" y="536" text-anchor="middle" class="s">dsh</text><text x="752" y="556" text-anchor="middle" class="s">Sidecar</text>
+  <rect x="210" y="610" width="500" height="45" class="box" stroke="#fb923c"/><text x="460" y="638" text-anchor="middle" class="s">Immutable Files · SQLite · LanceDB · Workspaces</text>
+  <path d="M275 540H310" class="line"/><path d="M470 540H505" class="line"/><path d="M650 540H685" class="line"/><path d="M390 570L430 610" class="line"/>
+
+  <rect x="950" y="85" width="410" height="650" class="zone" fill="#fff" stroke="#94a3b8"/><text x="975" y="118" class="t">外部网络 / 第三方服务</text>
+  <rect x="1000" y="155" width="310" height="70" class="box" stroke="#94a3b8"/><text x="1155" y="185" text-anchor="middle" class="s">Model Providers</text><text x="1155" y="205" text-anchor="middle" class="s">OpenAI / Qwen / DeepSeek / ...</text>
+  <rect x="1000" y="270" width="310" height="70" class="box" stroke="#94a3b8"/><text x="1155" y="300" text-anchor="middle" class="s">Search / MCP Services</text><text x="1155" y="320" text-anchor="middle" class="s">显式配置的 HTTPS 出站</text>
+  <rect x="1000" y="385" width="310" height="70" class="box" stroke="#94a3b8"/><text x="1155" y="415" text-anchor="middle" class="s">Telegram / Feishu</text><text x="1155" y="435" text-anchor="middle" class="s">Gateway 主动出站连接</text>
+  <rect x="1000" y="500" width="310" height="70" class="box" stroke="#94a3b8"/><text x="1155" y="530" text-anchor="middle" class="s">Relay Server</text><text x="1155" y="550" text-anchor="middle" class="s">WSS / 心跳 / 请求转发</text>
+  <rect x="1000" y="615" width="310" height="70" class="box" stroke="#94a3b8"/><text x="1155" y="645" text-anchor="middle" class="s">Package / Model Downloads</text><text x="1155" y="665" text-anchor="middle" class="s">按需安装与完整性校验</text>
+  <path d="M860 525C920 525 925 190 1000 190" class="line dash"/><path d="M860 545C930 545 930 305 1000 305" class="line dash"/><path d="M405 327C720 327 800 420 1000 420" class="line dash"/><path d="M405 342C700 342 840 535 1000 535" class="line dash"/>
+  <text x="960" y="770" class="s">原则：最小出站 allowlist；API/存储/sidecar 不直接暴露公网；公网入口必须 TLS + 鉴权。</text>
+</svg>

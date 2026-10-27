@@ -6,6 +6,7 @@
 
 | 功能 | 入口 | 状态 |
 | --- | --- | --- |
+| 平台架构基线 | [features/platform-architecture/README.md](features/platform-architecture/README.md) | 逆向补全完成，待架构评审与文档验收 |
 | 离线召回评测报告 | [features/knowledge-evaluation/README.md](features/knowledge-evaluation/README.md) | KEV-T01，验证见status |
 | 对话身份与显式 MCP 关联 | [features/chat-capability-boundary.md](features/chat-capability-boundary.md) | CB-01～03，实际验证见规格状态 |
 | 统一 Agent Tool Interface | [features/unified-tool-interface/README.md](features/unified-tool-interface/README.md) | 已同步实现，待 WorkExpert 真实引擎验收 |
@@ -18,6 +19,8 @@
 | 发布完整性 | [features/release-readiness/README.md](features/release-readiness/README.md) | 实施中 |
 
 新跨模块功能应进入 `features/<feature>/`，至少包含需求、架构、计划、任务、测试和状态。
+
+平台进程/包边界、依赖方向、域单写者、密钥与执行隔离的共同基线见 [PAB-001](features/platform-architecture/README.md)；各功能 SDD 只描述在该边界内的业务行为。
 
 ## 历史总规格
 

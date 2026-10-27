@@ -11,7 +11,10 @@
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
 | [system-overview.md](system-overview.md) | 系统上下文、进程和模块摘要 | ✅ 当前总览 |
+| [ADR 可视化附录](adr/diagrams.md) | 逻辑分层、控制/执行面、数据安全边界和部署网络拓扑 | 📝 待评审图形规格 |
 | [ADR 索引](adr/README.md) | 长期、跨模块且难以逆转的架构决策 | 按 ADR 状态 |
+| [ADR 决策体系分析](adr/analysis-2026-10-27.md) | 当前 ADR-0003～0009 的决策链、替代关系、SDD/实现对应和治理缺口 | 📝 待评审分析 |
+| [平台架构基线 SDD](../sdd/features/platform-architecture/README.md) | 从当前实现逆向形成的进程、依赖、数据、密钥和安全边界规格 | 📝 待评审规格 |
 | [应用模型能力运行时](application-model-capability-runtime.md) | 主控模型、能力路由、统一 Tool Interface、异步进度、URL 产物落盘和多引擎边界 | 📝 已同步设计，待 SDD 落地 |
 | [data-capability-platform.md](data-capability-platform.md) | 数据工作台、统一数据网关、应用数据单元、操作 Spec 与 Skill 的边界和闭环 | ✅ 当前方案 |
 | [architecture.md](architecture.md) | 当前项目架构 / 进程与模块边界 / 主要逻辑（会话·滚动记忆·可续跑审批·**Plan/Run/ChangeSet 项目编排**·存储 keyring·通道） | ✅ 当前权威 |
